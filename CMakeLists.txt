@@ -120,6 +120,9 @@ foreach(_bs IN LISTS _sm64_all_backend_sources)
 endforeach()
 list(REMOVE_ITEM _sm64_host_sources "${SM64_ROOT}/src/pc/pc_main.c")
 list(APPEND _sm64_host_sources "${SM64_ROOT}/src/pc/host/sm64ex_host.c")
+# SDL3 gamepad backend (mirrors controller_sdl2.c); guarded by CAPI_SDL3 so it
+# stays inert in the regular SDL2/PC builds that compile this same source list.
+list(APPEND _sm64_host_sources "${SM64_ROOT}/src/pc/controller/controller_sdl3.c")
 add_library(sm64ex STATIC ${_sm64_host_sources})
 add_dependencies(sm64ex sm64_assets)
 target_include_directories(sm64ex PRIVATE
@@ -218,8 +221,29 @@ if(SM64_FOUNDATION_PORT)
       GIT_SHALLOW TRUE)
   endif()
   FetchContent_MakeAvailable(Foundation)
+  # Foundation defines FOUNDATION_ROOT_DIR only inside its own subdirectory
+  # scope (CMakeLists.txt: set(FOUNDATION_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR})),
+  # so it is NOT visible in this top-level scope. Derive it from the source dir
+  # that is actually in scope here (the user-provided FOUNDATION_SOURCE_DIR, or
+  # the FetchContent-populated Foundation_SOURCE_DIR in the git-tag branch) and
+  # re-expose it as a cache var for the rest of this file.
+  if(FOUNDATION_SOURCE_DIR)
+    set(_foundation_src "${FOUNDATION_SOURCE_DIR}")
+  else()
+    set(_foundation_src "${Foundation_SOURCE_DIR}")
+  endif()
+  set(FOUNDATION_ROOT_DIR "${_foundation_src}" CACHE PATH "Foundation source root" FORCE)
+  # Slang shader toolchain (same as Foundation/Examples): compiles .slang -> .spv
+  # into the runtime Data/Shaders dir, where the host resolves shaders at load.
+  include("${FOUNDATION_ROOT_DIR}/slangc_compile.cmake")
+  set(SHADER_BUILD_DIR "${CMAKE_BINARY_DIR}/bin/Data/Shaders")
+  file(MAKE_DIRECTORY "${SHADER_BUILD_DIR}")
+  # sm64ex compiles the SDL3 gamepad backend; give it the SDL3 headers/libs and
+  # the CAPI_SDL3 switch so controller_sdl3.c (and its registration in
+  # controller_entry_point.c) are active only on the Foundation host.
+  target_compile_definitions(sm64ex PRIVATE CAPI_SDL3=1)
+  target_link_libraries(sm64ex PRIVATE SDL3::SDL3)
   add_executable(sm64_foundation src/pc/foundation/sm64_foundation_main.cpp)
-  
   foreach(_dep Foundation_Shaders Editor_Data Shader_PostprocessBasic)
     if(TARGET ${_dep})
       add_dependencies(sm64_foundation ${_dep})

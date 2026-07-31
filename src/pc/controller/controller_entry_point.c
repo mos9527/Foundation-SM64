@@ -6,7 +6,11 @@
 
 #include "controller_recorded_tas.h"
 #include "controller_keyboard.h"
+#if defined(CAPI_SDL3)
+#include "controller_sdl3.h"
+#else
 #include "controller_sdl.h"
+#endif
 
 // Analog camera movement by Pathétique (github.com/vrmiguel), y0shin and Mors
 // Contribute or communicate bugs at github.com/vrmiguel/sm64-analog-camera
@@ -15,6 +19,8 @@ static struct ControllerAPI *controller_implementations[] = {
     &controller_recorded_tas,
     #if defined(CAPI_SDL2) || defined(CAPI_SDL1)
     &controller_sdl,
+    #elif defined(CAPI_SDL3)
+    &controller_sdl3,
     #endif
     &controller_keyboard,
 };
