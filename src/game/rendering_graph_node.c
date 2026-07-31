@@ -196,6 +196,12 @@ static void geo_process_master_list_sub(struct GraphNodeMasterList *node) {
         gSPSetGeometryMode(gDisplayListHead++, G_ZBUFFER);
     }
 
+    // [Foundation] Tag this master list as skybox (ortho, no depth buffer) or
+    // game geometry (perspective / depth-buffered) so the renderer can split
+    // them into separate passes. gDPNoOpTag is a no-op on real hardware / other
+    // backends; only gfx_pc's Foundation path reads the tag.
+    gDPNoOpTag(gDisplayListHead++, enableZBuffer ? FOUNDATION_PASS_GAME : FOUNDATION_PASS_SKYBOX);
+
     for (i = 0; i < GFX_NUM_MASTER_LISTS; i++) {
         if ((currList = node->listHeads[i]) != NULL) {
             gDPSetRenderMode(gDisplayListHead++, modeList->modes[i], mode2List->modes[i]);

@@ -49,6 +49,12 @@
 #define LAYER_TRANSPARENT_DECAL 6
 #define LAYER_TRANSPARENT_INTER 7
 
+// Foundation renderer: render-pass markers emitted via gDPNoOpTag in
+// rendering_graph_node.c / area.c. Mirrors FOUNDATION_PASS_* in gfx_rendering_api.h.
+#define FOUNDATION_PASS_SKYBOX 1
+#define FOUNDATION_PASS_GAME   2
+#define FOUNDATION_PASS_UI     3
+
 #define INPUT_NONZERO_ANALOG         0x0001
 #define INPUT_A_PRESSED              0x0002
 #define INPUT_OFF_FLOOR              0x0004

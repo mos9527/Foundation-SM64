@@ -376,6 +376,10 @@ void render_game(void) {
 
         gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE, 0, BORDER_HEIGHT, SCREEN_WIDTH,
                       SCREEN_HEIGHT - BORDER_HEIGHT);
+
+        // [Foundation] Mark the start of the UI / HUD pass. gDPNoOpTag is a no-op
+        // on real hardware / other backends; only gfx_pc's Foundation path reads it.
+        gDPNoOpTag(gDisplayListHead++, FOUNDATION_PASS_UI);
         render_hud();
 
         gDPSetScissor(gDisplayListHead++, G_SC_NON_INTERLACE, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);

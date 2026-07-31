@@ -1551,6 +1551,16 @@ static void gfx_run_dl(Gfx* cmd) {
         
         switch (opcode) {
             // RSP commands:
+            case (uint8_t)G_NOOP:
+                // The game forwards render-pass markers via gDPNoOpTag(). Only the
+                // Foundation backend implements set_render_layer; for every other
+                // backend this is a pure no-op. Flush first so the batch already
+                // accumulated (under the previous pass) is captured correctly.
+                if (gfx_rapi->set_render_layer != NULL) {
+                    gfx_flush();
+                    gfx_rapi->set_render_layer(cmd->words.w1);
+                }
+                break;
             case G_MTX:
 #ifdef F3DEX_GBI_2
                 gfx_sp_matrix(C0(0, 8) ^ G_MTX_PUSH, (const int32_t *) seg_addr(cmd->words.w1));

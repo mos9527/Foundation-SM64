@@ -5,6 +5,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Render-pass tags forwarded from the game (via gDPNoOpTag in the display list)
+// to GfxRenderingAPI.set_render_layer. Lets a backend partition draws into e.g.
+// a skybox / game-geometry / UI split without relying on projection heuristics.
+#define FOUNDATION_PASS_SKYBOX 1u
+#define FOUNDATION_PASS_GAME   2u
+#define FOUNDATION_PASS_UI     3u
+
 struct ShaderProgram;
 
 struct GfxRenderingAPI {
@@ -39,6 +46,11 @@ struct GfxRenderingAPI {
     // buf_vbo.
     void (*draw_triangles_3d)(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris,
                               const float *buf_pos3d, const float projection[4][4]);
+
+    // Optional. Forwarded render-pass marker from the game (gDPNoOpTag). Backends
+    // that partition draws (e.g. skybox / game / UI) set this; others leave it NULL
+    // and the markers are ignored. gfx_pc flushes the current batch before calling it.
+    void (*set_render_layer)(uint32_t tag);
 };
 
 #endif

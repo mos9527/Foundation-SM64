@@ -161,6 +161,14 @@ static uint32_t g_ui_tris = 0;
 static bool g_dropped_ui = false;
 static bool g_use_alpha = false;
 
+// [Foundation] Skybox capture. The skybox is ortho/screen-space, like the UI
+// overlay, but kept in its own buffer so it can be drawn as a dedicated pass
+// behind the game geometry.
+static std::vector<UiVertex> g_skybox_verts;
+static std::vector<UiBatch> g_skybox_batches;
+static uint32_t g_skybox_tris = 0;
+static bool g_dropped_skybox = false;
+
 // UI overlay vertex buffer (recreated on each RebuildGraph; the renderer owns
 // the underlying memory). Bound as a vertex buffer and updated per-frame via
 // cmd->UpdateBuffer from the captured g_ui_verts soup.
@@ -384,11 +392,44 @@ static void ra_draw_triangles(float[], size_t, size_t) {}
 // Perspective (game) vs screen-space/ortho (UI). pos3d is only filled for
 // vertices that went through a modelview; HUD rectangles set is_3d=false so
 // pos3d is NULL. Ortho world draws still have pos3d but projection[2][3]==0.
+// [Foundation] Current render pass, forwarded from the game via gDPNoOpTag ->
+// set_render_layer. Lets us split the single gfx_pc draw stream into
+// skybox / game-geometry / UI zones instead of guessing from the projection.
+static uint32_t g_current_pass = FOUNDATION_PASS_GAME;
+static uint64_t g_pass_tris[4] = {0, 0, 0, 0}; // indexed by FOUNDATION_PASS_* tag
+static uint32_t g_last_pass_log = 0;
+
+static void ra_set_render_layer(uint32_t tag) {
+    if (tag < FOUNDATION_PASS_SKYBOX || tag > FOUNDATION_PASS_UI)
+        return;
+    if (tag != g_current_pass) {
+        // Throttled summary so we can confirm the three zones are distinct.
+        const uint32_t now = SDL_GetTicks();
+        if (now - g_last_pass_log > 1000) {
+            std::fprintf(stderr,
+                "[foundation] passes (last ~1s): skybox=%llu game=%llu ui=%llu tris\n",
+                (unsigned long long)g_pass_tris[FOUNDATION_PASS_SKYBOX],
+                (unsigned long long)g_pass_tris[FOUNDATION_PASS_GAME],
+                (unsigned long long)g_pass_tris[FOUNDATION_PASS_UI]);
+            g_pass_tris[FOUNDATION_PASS_SKYBOX] = 0;
+            g_pass_tris[FOUNDATION_PASS_GAME] = 0;
+            g_pass_tris[FOUNDATION_PASS_UI] = 0;
+            g_last_pass_log = now;
+        }
+    }
+    g_current_pass = tag;
+}
+
 static bool IsGamePerspectiveDraw(const float* pos3d, const float projection[4][4]) {
     return pos3d != nullptr && std::fabs(projection[2][3]) > 1e-6f;
 }
 
-static void CaptureUiBatch(float buf_vbo[], size_t buf_vbo_len, size_t num_tris) {
+// Shared screen-space capture used by both the skybox and UI/overlay passes.
+// Both are ortho (no perspective), so vertices are stored as clip-space
+// (px,py,pz,pw) and drawn as screen-space overlays later.
+static void CaptureScreenSpaceBatch(std::vector<UiVertex>& verts, std::vector<UiBatch>& batches,
+                                    uint32_t& triCount, bool& dropped, uint32_t maxTris,
+                                    float buf_vbo[], size_t buf_vbo_len, size_t num_tris) {
     const uint32_t stride = g_cur_shader->num_floats;
     if (buf_vbo_len != num_tris * 3u * stride)
         return;
@@ -403,7 +444,7 @@ static void CaptureUiBatch(float buf_vbo[], size_t buf_vbo_len, size_t num_tris)
     uint32_t colorOff = 4 + (textured ? 2u : 0u) + (fog ? 4u : 0u);
 
     UiBatch batch{};
-    batch.firstVertex = static_cast<uint32_t>(g_ui_verts.size());
+    batch.firstVertex = static_cast<uint32_t>(verts.size());
     batch.textureId = textured ? g_cur_tex[0] : 0u;
     batch.shaderId = g_cur_shader->shader_id;
     batch.useAlpha = g_use_alpha || alpha;
@@ -419,8 +460,8 @@ static void CaptureUiBatch(float buf_vbo[], size_t buf_vbo_len, size_t num_tris)
     }
 
     for (size_t t = 0; t < num_tris; ++t) {
-        if (g_ui_tris >= kMaxUiTris) {
-            g_dropped_ui = true;
+        if (triCount >= maxTris) {
+            dropped = true;
             break;
         }
         for (uint32_t v = 0; v < 3; ++v) {
@@ -439,13 +480,25 @@ static void CaptureUiBatch(float buf_vbo[], size_t buf_vbo_len, size_t num_tris)
                 u.r = u.g = u.b = u.a = 1.0f;
             }
             u.texId = bindlessId;
-            g_ui_verts.push_back(u);
+            verts.push_back(u);
         }
-        ++g_ui_tris;
+        ++triCount;
         batch.vertexCount += 3;
     }
     if (batch.vertexCount > 0)
-        g_ui_batches.push_back(batch);
+        batches.push_back(batch);
+}
+
+static void CaptureUiBatch(float buf_vbo[], size_t buf_vbo_len, size_t num_tris) {
+    CaptureScreenSpaceBatch(g_ui_verts, g_ui_batches, g_ui_tris, g_dropped_ui, kMaxUiTris,
+                            buf_vbo, buf_vbo_len, num_tris);
+}
+
+// [Foundation] Skybox is ortho/screen-space like the UI overlay, but kept in its
+// own buffer so it can be drawn as a separate pass behind the game geometry.
+static void CaptureSkyboxBatch(float buf_vbo[], size_t buf_vbo_len, size_t num_tris) {
+    CaptureScreenSpaceBatch(g_skybox_verts, g_skybox_batches, g_skybox_tris, g_dropped_skybox, kMaxUiTris,
+                            buf_vbo, buf_vbo_len, num_tris);
 }
 
 // ---------------------------------------------------------------------------
@@ -577,15 +630,27 @@ static void ra_draw_triangles_3d(float buf_vbo[], size_t buf_vbo_len, size_t num
     if (!g_cur_shader || num_tris == 0)
         return;
 
-    if (IsGamePerspectiveDraw(pos3d, projection)) {
+    // Partition into skybox / game-geometry / UI by the explicit pass tag the
+    // game forwarded (skybox and UI are both ortho/screen-space and cannot be
+    // told apart by projection alone, which is why we tag them upstream).
+    const bool isGame3D = (g_current_pass == FOUNDATION_PASS_GAME) && IsGamePerspectiveDraw(pos3d, projection);
+    if (isGame3D) {
         // projection == rsp.P_matrix, built from node->fov via guPerspective:
         // projection[1][1] = 1 / tan(fovY/2). Decode it so the camera matches the
         // game exactly, independent of sFOVState.
         if (projection[1][1] > 1e-6f)
             g_gameFovY = 2.0f * atanf(1.0f / projection[1][1]);
         CaptureGameBatch(buf_vbo, buf_vbo_len, num_tris, pos3d);
+        g_pass_tris[FOUNDATION_PASS_GAME] += num_tris;
+    } else if (g_current_pass == FOUNDATION_PASS_SKYBOX) {
+        // Skybox is ortho/screen-space; keep it in its own buffer so it can be
+        // drawn as a dedicated pass behind the game geometry.
+        CaptureSkyboxBatch(buf_vbo, buf_vbo_len, num_tris);
+        g_pass_tris[FOUNDATION_PASS_SKYBOX] += num_tris;
     } else {
+        // UI / HUD overlay (ortho / screen-space).
         CaptureUiBatch(buf_vbo, buf_vbo_len, num_tris);
+        g_pass_tris[FOUNDATION_PASS_UI] += num_tris;
     }
 }
 static void ra_init(void) {}
@@ -620,6 +685,7 @@ static struct GfxRenderingAPI gfx_rendering_api = {
     ra_finish_render,
     ra_shutdown,
     ra_draw_triangles_3d,
+    ra_set_render_layer,
 };
 
 // ===========================================================================
@@ -766,6 +832,10 @@ int main(int argc, char** argv) {
         g_ui_batches.clear();
         g_ui_tris = 0;
         g_dropped_ui = false;
+        g_skybox_verts.clear();
+        g_skybox_batches.clear();
+        g_skybox_tris = 0;
+        g_dropped_skybox = false;
         sm64ex_host_frame();
 
         // Camera FOV decoded from the game projection matrix (authoritative;
@@ -808,8 +878,8 @@ int main(int argc, char** argv) {
 
         CommitScene(gpu, liveBuckets);
 
-        Examples_Text(g_input, Format("sm64ex Foundation | {:.0f} FPS | game {} tris | ui {} tris ({} batches)",
-                                      g_fps.Update(), g_captured_tris, g_ui_tris, g_ui_batches.size()));
+        Examples_Text(g_input, Format("sm64ex Foundation | {:.0f} FPS | game {} tris | skybox {} | ui {} tris ({} batches)",
+                                      g_fps.Update(), g_captured_tris, g_skybox_tris, g_ui_tris, g_ui_batches.size()));
         Examples_Text(g_input, Format("FOV {:.1f} deg | frame {} | {}/{} material buckets | {} textures",
                                       degrees(g_camera.fovY), ctx.renderer->GetFrame(), g_live_buckets,
                                       kMaxBuckets, g_tex_by_hash.size()));
@@ -820,6 +890,8 @@ int main(int argc, char** argv) {
             Examples_Text(g_input, Format("dropped textures past the {} budget", 4096));
         if (g_dropped_ui)
             Examples_Text(g_input, Format("dropped UI triangles past the {} budget", kMaxUiTris));
+        if (g_dropped_skybox)
+            Examples_Text(g_input, Format("dropped skybox triangles past the {} budget", kMaxUiTris));
         // UI overlay pass commits g_ui_batches / g_ui_verts (see RebuildGraph).
         if (Examples_RendererSwitchButton(g_input, g_renderer))
             g_input.wantResizeOrRebuild = true;
