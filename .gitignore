@@ -83,3 +83,4 @@ sm64config.txt
 .DS_Store
 
 build-cmake/
+cmake-*/

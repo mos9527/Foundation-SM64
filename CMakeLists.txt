@@ -34,7 +34,7 @@ if(CMAKE_C_BYTE_ORDER STREQUAL "BIG_ENDIAN")
 else()
   set(SM64_ENDIAN little)
 endif()
-math(EXPR SM64_BITWIDTH "${CMAKE_SIZEOF_VOID_P} * 8")
+math(EXPR SM64_BITWIDTH 64)
 if(SM64_VERSION STREQUAL "jp")
   set(SM64_VERSION_DEF VERSION_JP)
 elseif(SM64_VERSION STREQUAL "us")
@@ -234,6 +234,22 @@ if(SM64_FOUNDATION_PORT)
     Example_Common    
     Example_Renderer  
     SDL3::SDL3)       
+  # Run outside MSYS2 (RenderDoc, plain Explorer), where an unrelated
+  # libwinpthread-1.dll on PATH otherwise wins and fails to resolve nanosleep64.
+  # Windows prefers the exe's own directory, so copying the runtime beside it is
+  # enough -- and unlike -static it avoids MinGW's static winpthread, whose
+  # nanosleep disagrees with the headers about struct timespec.
+  if(MINGW)
+    get_filename_component(_sm64_cxx_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    foreach(_dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll libatomic-1.dll)
+      if(EXISTS "${_sm64_cxx_dir}/${_dll}")
+        add_custom_command(TARGET sm64_foundation POST_BUILD
+          COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                  "${_sm64_cxx_dir}/${_dll}" "$<TARGET_FILE_DIR:sm64_foundation>"
+          COMMENT "Staging ${_dll} next to sm64_foundation")
+      endif()
+    endforeach()
+  endif()
   set_target_properties(sm64_foundation PROPERTIES
     CXX_STANDARD 20
     CXX_EXTENSIONS OFF  

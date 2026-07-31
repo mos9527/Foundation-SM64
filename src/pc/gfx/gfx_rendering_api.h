@@ -31,6 +31,14 @@ struct GfxRenderingAPI {
     void (*end_frame)(void);
     void (*finish_render)(void);
     void (*shutdown)(void);
+
+    // Optional; takes precedence over draw_triangles when set. Backends that
+    // reconstruct 3D geometry (rather than drawing gfx_pc's clip-space output)
+    // additionally get modelview-space positions -- 9 floats per triangle, or
+    // NULL for screen-space batches -- plus the projection gfx_pc baked into
+    // buf_vbo.
+    void (*draw_triangles_3d)(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris,
+                              const float *buf_pos3d, const float projection[4][4]);
 };
 
 #endif

@@ -71,9 +71,13 @@ struct XYWidthHeight {
 
 struct LoadedVertex {
     float x, y, z, w;
+    // Modelview-only position, i.e. before the projection baked into x/y/z/w.
+    // Only meaningful when is_3d; screen-space draws never go through a modelview.
+    float vx, vy, vz;
     float u, v;
     struct RGBA color;
     uint8_t clip_rej;
+    bool is_3d;
 };
 
 struct TextureHashmapNode {
@@ -173,6 +177,12 @@ static float buf_vbo[MAX_BUFFERED * (26 * 3)]; // 3 vertices in a triangle and 2
 static size_t buf_vbo_len;
 static size_t buf_vbo_num_tris;
 
+// Modelview-space positions for the current batch, only filled for backends that
+// implement draw_triangles_3d. A batch is either all 3D or all screen-space.
+static float buf_pos3d[MAX_BUFFERED * (3 * 3)];
+static size_t buf_pos3d_len;
+static bool buf_batch_is_3d;
+
 static struct GfxWindowManagerAPI *gfx_wapi;
 static struct GfxRenderingAPI *gfx_rapi;
 
@@ -203,7 +213,13 @@ static void gfx_flush(void) {
     if (buf_vbo_len > 0) {
         int num = buf_vbo_num_tris;
         unsigned long t0 = get_time();
-        gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
+        if (gfx_rapi->draw_triangles_3d != NULL) {
+            gfx_rapi->draw_triangles_3d(buf_vbo, buf_vbo_len, buf_vbo_num_tris,
+                                        buf_batch_is_3d ? buf_pos3d : NULL, rsp.P_matrix);
+        } else {
+            gfx_rapi->draw_triangles(buf_vbo, buf_vbo_len, buf_vbo_num_tris);
+        }
+        buf_pos3d_len = 0;
         buf_vbo_len = 0;
         buf_vbo_num_tris = 0;
         unsigned long t1 = get_time();
@@ -763,7 +779,15 @@ static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx *verti
         float w = v->ob[0] * rsp.MP_matrix[0][3] + v->ob[1] * rsp.MP_matrix[1][3] + v->ob[2] * rsp.MP_matrix[2][3] + rsp.MP_matrix[3][3];
         
         x = gfx_adjust_x_for_aspect_ratio(x);
-        
+
+        if (gfx_rapi->draw_triangles_3d != NULL) {
+            const float (*mv)[4] = rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1];
+            d->vx = v->ob[0] * mv[0][0] + v->ob[1] * mv[1][0] + v->ob[2] * mv[2][0] + mv[3][0];
+            d->vy = v->ob[0] * mv[0][1] + v->ob[1] * mv[1][1] + v->ob[2] * mv[2][1] + mv[3][1];
+            d->vz = v->ob[0] * mv[0][2] + v->ob[1] * mv[1][2] + v->ob[2] * mv[2][2] + mv[3][2];
+        }
+        d->is_3d = true;
+
         short U = v->tc[0] * rsp.texture_scaling_factor.s >> 16;
         short V = v->tc[1] * rsp.texture_scaling_factor.t >> 16;
         
@@ -990,6 +1014,21 @@ static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx) {
     uint32_t tex_height = (rdp.texture_tile.lrt - rdp.texture_tile.ult + 4) / 4;
     
     bool z_is_from_0_to_1 = gfx_rapi->z_is_from_0_to_1();
+
+    if (gfx_rapi->draw_triangles_3d != NULL) {
+        bool is_3d = v1->is_3d && v2->is_3d && v3->is_3d;
+        if (buf_vbo_num_tris > 0 && is_3d != buf_batch_is_3d) {
+            gfx_flush();
+        }
+        buf_batch_is_3d = is_3d;
+        if (is_3d) {
+            for (int i = 0; i < 3; i++) {
+                buf_pos3d[buf_pos3d_len++] = v_arr[i]->vx;
+                buf_pos3d[buf_pos3d_len++] = v_arr[i]->vy;
+                buf_pos3d[buf_pos3d_len++] = v_arr[i]->vz;
+            }
+        }
+    }
     
     for (int i = 0; i < 3; i++) {
         float z = v_arr[i]->z, w = v_arr[i]->w;
@@ -1363,6 +1402,8 @@ static void gfx_draw_rectangle(int32_t ulx, int32_t uly, int32_t lrx, int32_t lr
     struct LoadedVertex* lr = &rsp.loaded_vertices[MAX_VERTICES + 2];
     struct LoadedVertex* ur = &rsp.loaded_vertices[MAX_VERTICES + 3];
     
+    ul->is_3d = ll->is_3d = lr->is_3d = ur->is_3d = false;
+
     ul->x = ulxf;
     ul->y = ulyf;
     ul->z = -1.0f;
