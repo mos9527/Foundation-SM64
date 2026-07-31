@@ -6,7 +6,7 @@ Collects from <build>/bin/:
   - *.exe, *.dll, *.so, *.dylib
   - other executable files (Unix binaries with the execute bit)
 
-Writes packages/foundation-sm64-<git-hash>.zip at the repository root.
+Writes packages/Foundation-sm64-<git-hash>.zip at the repository root.
 """
 
 from __future__ import annotations
@@ -152,7 +152,7 @@ def main(argv: list[str]) -> int:
         "--output",
         type=Path,
         default=None,
-        help="Output zip path (default: packages/foundation-sm64-<git-hash>.zip)",
+        help="Output zip path (default: packages/Foundation-sm64-<git-hash>.zip)",
     )
     args = parser.parse_args(argv)
 
@@ -169,7 +169,7 @@ def main(argv: list[str]) -> int:
     short = git_hash(REPO_ROOT)
     out_zip = args.output
     if out_zip is None:
-        out_zip = REPO_ROOT / "packages" / f"foundation-sm64-{short}.zip"
+        out_zip = REPO_ROOT / "packages" / f"Foundation-sm64-{short}.zip"
     elif not out_zip.is_absolute():
         out_zip = (REPO_ROOT / out_zip).resolve()
 
