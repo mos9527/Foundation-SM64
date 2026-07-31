@@ -241,7 +241,7 @@ if(SM64_FOUNDATION_PORT)
   # sm64ex compiles the SDL3 gamepad backend; give it the SDL3 headers/libs and
   # the CAPI_SDL3 switch so controller_sdl3.c (and its registration in
   # controller_entry_point.c) are active only on the Foundation host.
-  target_compile_definitions(sm64ex PRIVATE CAPI_SDL3=1)
+  target_compile_definitions(sm64ex PRIVATE CAPI_SDL3=1 AAPI_SDL3=1)
   target_link_libraries(sm64ex PRIVATE SDL3::SDL3)
   add_executable(sm64_foundation src/pc/foundation/sm64_foundation_main.cpp)
   foreach(_dep Foundation_Shaders Editor_Data Shader_PostprocessBasic)
