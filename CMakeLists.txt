@@ -8,7 +8,6 @@ set(SM64_VERSION "us" CACHE STRING "ROM version: us / jp / eu / sh")
 set_property(CACHE SM64_VERSION PROPERTY STRINGS us jp eu sh)
 set(SM64_GRUCODE "f3dex2e" CACHE STRING "Microcode: f3dex2e / f3dex2 / f3dex / f3d_new / f3dzex")
 set_property(CACHE SM64_GRUCODE PROPERTY STRINGS f3dex2e f3dex2 f3dex f3d_new f3dzex)
-option(SM64_BUILD_EXE "Also build the classic standalone executable for comparison (needs SDL2 + GLEW)" ON)
 option(SM64_BUILD_ROM_TOOLS "Also build host tools only needed for ROM builds" OFF)
 option(SM64_NIGHTLY "Embed the git hash in the title screen (upstream nightly behaviour)" ON)
 set(SM64_OPT_FLAGS "-O2" CACHE STRING "Optimisation flags (upstream uses -O2)")
@@ -135,7 +134,14 @@ target_include_directories(sm64ex PUBLIC "${SM64_ROOT}/src/pc/host")
 target_compile_definitions(sm64ex PRIVATE
   ${SM64_VERSION_DEFS}
   ${SM64_GRUCODE_DEF}
-  AAPI_NULL=1)
+  AAPI_NULL=1
+  # Match Makefile defaults / common PC-port toggles:
+  #   EXT_OPTIONS_MENU  — Options / Controls / Display / Sound (pause + R)
+  #   NODRAWINGDISTANCE — keep distant objects/surfaces loaded
+  #   TEXTSAVES         — human-readable save files alongside binary
+  EXT_OPTIONS_MENU=1
+  NODRAWINGDISTANCE=1
+  TEXTSAVES=1)
 if(SM64_GIT_HASH)
   target_compile_definitions(sm64ex PRIVATE NIGHTLY GIT_HASH="${SM64_GIT_HASH}")
 endif()
@@ -153,144 +159,106 @@ else()
   find_package(Threads REQUIRED)
   target_link_libraries(sm64ex PRIVATE Threads::Threads)
 endif()
-if(SM64_BUILD_EXE)
-  find_package(SDL2 QUIET)
-  find_package(OpenGL QUIET)
-  if(WIN32)
-    find_library(GLEW_LIB NAMES glew32 glew)
-  else()
-    find_package(GLEW QUIET)
-  endif()
-  if(SDL2_FOUND AND OPENGL_FOUND AND (WIN32 AND GLEW_LIB OR (NOT WIN32 AND GLEW_FOUND)))        
-    set(_sm64_exe_sources ${SM64_SOURCES})
-    add_executable(sm64pc ${_sm64_exe_sources})
-    add_dependencies(sm64pc sm64_assets)
-    set_target_properties(sm64pc PROPERTIES
-      OUTPUT_NAME "sm64.${SM64_VERSION}.${SM64_GRUCODE}")
-    target_include_directories(sm64pc PRIVATE
-      "${SM64_ROOT}/include"
-      "${SM64_GEN_DIR}"
-      "${SM64_GEN_DIR}/include"
-      "${SM64_ROOT}/src"
-      "${SM64_ROOT}")
-    target_compile_definitions(sm64pc PRIVATE
-      ${SM64_VERSION_DEFS}
-      ${SM64_GRUCODE_DEF}
-      RAPI_GL=1 WAPI_SDL2=1 AAPI_SDL2=1 CAPI_SDL2=1 HAVE_SDL2=1)
-    if(SM64_GIT_HASH)
-      target_compile_definitions(sm64pc PRIVATE NIGHTLY GIT_HASH="${SM64_GIT_HASH}")
-    endif()
-    target_compile_options(sm64pc PRIVATE
-      ${_sm64_opt_flags}
-      -fno-strict-aliasing -fwrapv -fsigned-char
-      -Wno-format-security)
-    set_target_properties(sm64pc PROPERTIES
-      C_STANDARD 11
-      C_EXTENSIONS ON)
-    target_link_libraries(sm64pc PRIVATE SDL2::SDL2 OpenGL::GL)
-    if(WIN32)
-      target_link_libraries(sm64pc PRIVATE "${GLEW_LIB}" glu32 opengl32 ws2_32 winmm)
-    else()
-      target_link_libraries(sm64pc PRIVATE GLEW::GLEW m)
-      find_package(Threads REQUIRED)
-      target_link_libraries(sm64pc PRIVATE Threads::Threads)
-    endif()
-  else()
-    message(WARNING
-      "SM64_BUILD_EXE=ON but SDL2/OpenGL/GLEW not found -- "
-      "skipping the standalone executable target 'sm64pc'.")
-  endif()
+# SM64_BUILD_EXE / sm64pc (classic SDL2+GLEW standalone) are removed; the
+# Foundation-renderer host is the only executable target.
+if(DEFINED SM64_BUILD_EXE)
+  message(DEPRECATION
+    "SM64_BUILD_EXE / sm64pc is deprecated and ignored; "
+    "only the Foundation host (sm64_foundation) is built.")
+  unset(SM64_BUILD_EXE CACHE)
 endif()
-
+if(DEFINED SM64_FOUNDATION_PORT)
+  message(DEPRECATION
+    "SM64_FOUNDATION_PORT is always enabled and no longer an option; "
+    "unset -DSM64_FOUNDATION_PORT=... from your configure command.")
+  unset(SM64_FOUNDATION_PORT CACHE)
+endif()
 message(STATUS "SM64: version=${SM64_VERSION} grucode=${SM64_GRUCODE} "
-               "endian=${SM64_ENDIAN} bits=${SM64_BITWIDTH} "
-               "build_exe=${SM64_BUILD_EXE}")
-option(SM64_FOUNDATION_PORT "Build the Foundation-renderer host" OFF)
-if(SM64_FOUNDATION_PORT)
- set(FOUNDATION_WITH_EXAMPLES ON CACHE BOOL "" FORCE)
-  set(FOUNDATION_WITH_JOLT_EXAMPLES OFF CACHE BOOL "" FORCE)
-  set(FOUNDATION_OS_ALLOCATOR ON CACHE BOOL "" FORCE)
-  include(FetchContent)
-  if(FOUNDATION_SOURCE_DIR)    
-    FetchContent_Declare(Foundation SOURCE_DIR "${FOUNDATION_SOURCE_DIR}")
-    message(STATUS "SM64: using local Foundation at ${FOUNDATION_SOURCE_DIR}")
-  else()
-    FetchContent_Declare(Foundation
-      GIT_REPOSITORY https://github.com/mos9527/Foundation
-      GIT_TAG dev
-      GIT_SHALLOW TRUE)
+               "endian=${SM64_ENDIAN} bits=${SM64_BITWIDTH}")
+
+set(FOUNDATION_WITH_EXAMPLES ON CACHE BOOL "" FORCE)
+set(FOUNDATION_WITH_JOLT_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(FOUNDATION_OS_ALLOCATOR ON CACHE BOOL "" FORCE)
+include(FetchContent)
+if(FOUNDATION_SOURCE_DIR)
+  FetchContent_Declare(Foundation SOURCE_DIR "${FOUNDATION_SOURCE_DIR}")
+  message(STATUS "SM64: using local Foundation at ${FOUNDATION_SOURCE_DIR}")
+else()
+  FetchContent_Declare(Foundation
+    GIT_REPOSITORY https://github.com/mos9527/Foundation
+    GIT_TAG dev
+    GIT_SHALLOW TRUE)
+endif()
+FetchContent_MakeAvailable(Foundation)
+# Foundation defines FOUNDATION_ROOT_DIR only inside its own subdirectory
+# scope (CMakeLists.txt: set(FOUNDATION_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR})),
+# so it is NOT visible in this top-level scope. Derive it from the source dir
+# that is actually in scope here (the user-provided FOUNDATION_SOURCE_DIR, or
+# the FetchContent-populated Foundation_SOURCE_DIR in the git-tag branch) and
+# re-expose it as a cache var for the rest of this file.
+if(FOUNDATION_SOURCE_DIR)
+  set(_foundation_src "${FOUNDATION_SOURCE_DIR}")
+else()
+  set(_foundation_src "${Foundation_SOURCE_DIR}")
+endif()
+set(FOUNDATION_ROOT_DIR "${_foundation_src}" CACHE PATH "Foundation source root" FORCE)
+# Slang shader toolchain (same as Foundation/Examples): compiles .slang -> .spv
+# into the runtime Data/Shaders dir, where the host resolves shaders at load.
+# The module lives under Source/ in current Foundation trees but used to sit at
+# the repo root, so accept either layout instead of hard-failing at configure.
+if(EXISTS "${FOUNDATION_ROOT_DIR}/Source/slangc_compile.cmake")
+  set(FOUNDATION_INCLUDE_DIR "${FOUNDATION_ROOT_DIR}/Source")
+else()
+  set(FOUNDATION_INCLUDE_DIR "${FOUNDATION_ROOT_DIR}")
+endif()
+include("${FOUNDATION_INCLUDE_DIR}/slangc_compile.cmake")
+set(SHADER_BUILD_DIR "${CMAKE_BINARY_DIR}/bin/Data/Shaders")
+file(MAKE_DIRECTORY "${SHADER_BUILD_DIR}")
+# Screen-space overlay shader used by the skybox and UI passes.
+slangc_compile(Shader_SM64Overlay
+  SOURCE "${SM64_ROOT}/src/pc/foundation/shaders/SM64Overlay.slang"
+  OUTPUT_DIR "${SHADER_BUILD_DIR}"
+  OUTPUT_NAME "SM64Overlay"
+  INCLUDE_DIRS "${FOUNDATION_INCLUDE_DIR}/Renderer/Shaders")
+# sm64ex compiles the SDL3 gamepad backend; give it the SDL3 headers/libs and
+# the CAPI_SDL3 switch so controller_sdl3.c (and its registration in
+# controller_entry_point.c) are active on the Foundation host.
+target_compile_definitions(sm64ex PRIVATE CAPI_SDL3=1 AAPI_SDL3=1)
+target_link_libraries(sm64ex PRIVATE SDL3::SDL3)
+add_executable(sm64_foundation src/pc/foundation/sm64_foundation_main.cpp)
+foreach(_dep Foundation_Shaders Editor_Data Shader_PostprocessBasic Shader_SM64Overlay)
+  if(TARGET ${_dep})
+    add_dependencies(sm64_foundation ${_dep})
   endif()
-  FetchContent_MakeAvailable(Foundation)
-  # Foundation defines FOUNDATION_ROOT_DIR only inside its own subdirectory
-  # scope (CMakeLists.txt: set(FOUNDATION_ROOT_DIR ${CMAKE_CURRENT_SOURCE_DIR})),
-  # so it is NOT visible in this top-level scope. Derive it from the source dir
-  # that is actually in scope here (the user-provided FOUNDATION_SOURCE_DIR, or
-  # the FetchContent-populated Foundation_SOURCE_DIR in the git-tag branch) and
-  # re-expose it as a cache var for the rest of this file.
-  if(FOUNDATION_SOURCE_DIR)
-    set(_foundation_src "${FOUNDATION_SOURCE_DIR}")
-  else()
-    set(_foundation_src "${Foundation_SOURCE_DIR}")
-  endif()
-  set(FOUNDATION_ROOT_DIR "${_foundation_src}" CACHE PATH "Foundation source root" FORCE)
-  # Slang shader toolchain (same as Foundation/Examples): compiles .slang -> .spv
-  # into the runtime Data/Shaders dir, where the host resolves shaders at load.
-  # The module lives under Source/ in current Foundation trees but used to sit at
-  # the repo root, so accept either layout instead of hard-failing at configure.
-  if(EXISTS "${FOUNDATION_ROOT_DIR}/Source/slangc_compile.cmake")
-    set(FOUNDATION_INCLUDE_DIR "${FOUNDATION_ROOT_DIR}/Source")
-  else()
-    set(FOUNDATION_INCLUDE_DIR "${FOUNDATION_ROOT_DIR}")
-  endif()
-  include("${FOUNDATION_INCLUDE_DIR}/slangc_compile.cmake")
-  set(SHADER_BUILD_DIR "${CMAKE_BINARY_DIR}/bin/Data/Shaders")
-  file(MAKE_DIRECTORY "${SHADER_BUILD_DIR}")
-  # Screen-space overlay shader used by the skybox and UI passes.
-  slangc_compile(Shader_SM64Overlay
-    SOURCE "${SM64_ROOT}/src/pc/foundation/shaders/SM64Overlay.slang"
-    OUTPUT_DIR "${SHADER_BUILD_DIR}"
-    OUTPUT_NAME "SM64Overlay"
-    INCLUDE_DIRS "${FOUNDATION_INCLUDE_DIR}/Renderer/Shaders")
-  # sm64ex compiles the SDL3 gamepad backend; give it the SDL3 headers/libs and
-  # the CAPI_SDL3 switch so controller_sdl3.c (and its registration in
-  # controller_entry_point.c) are active only on the Foundation host.
-  target_compile_definitions(sm64ex PRIVATE CAPI_SDL3=1 AAPI_SDL3=1)
-  target_link_libraries(sm64ex PRIVATE SDL3::SDL3)
-  add_executable(sm64_foundation src/pc/foundation/sm64_foundation_main.cpp)
-  foreach(_dep Foundation_Shaders Editor_Data Shader_PostprocessBasic Shader_SM64Overlay)
-    if(TARGET ${_dep})
-      add_dependencies(sm64_foundation ${_dep})
+endforeach()
+target_include_directories(sm64_foundation PRIVATE
+  "${SM64_ROOT}/src/pc/gfx"
+  "${SM64_ROOT}/src/pc"
+  "${FOUNDATION_INCLUDE_DIR}")
+target_link_libraries(sm64_foundation PRIVATE
+  sm64ex
+  Example_Common
+  Example_Renderer
+  SDL3::SDL3)
+# Run outside MSYS2 (RenderDoc, plain Explorer), where an unrelated
+# libwinpthread-1.dll on PATH otherwise wins and fails to resolve nanosleep64.
+# Windows prefers the exe's own directory, so copying the runtime beside it is
+# enough -- and unlike -static it avoids MinGW's static winpthread, whose
+# nanosleep disagrees with the headers about struct timespec.
+if(MINGW)
+  get_filename_component(_sm64_cxx_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  foreach(_dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll libatomic-1.dll)
+    if(EXISTS "${_sm64_cxx_dir}/${_dll}")
+      add_custom_command(TARGET sm64_foundation POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${_sm64_cxx_dir}/${_dll}" "$<TARGET_FILE_DIR:sm64_foundation>"
+        COMMENT "Staging ${_dll} next to sm64_foundation")
     endif()
   endforeach()
-  target_include_directories(sm64_foundation PRIVATE
-    "${SM64_ROOT}/src/pc/gfx"
-    "${SM64_ROOT}/src/pc"
-    "${FOUNDATION_INCLUDE_DIR}")
-  target_link_libraries(sm64_foundation PRIVATE
-    sm64ex            
-    Example_Common    
-    Example_Renderer  
-    SDL3::SDL3)       
-  # Run outside MSYS2 (RenderDoc, plain Explorer), where an unrelated
-  # libwinpthread-1.dll on PATH otherwise wins and fails to resolve nanosleep64.
-  # Windows prefers the exe's own directory, so copying the runtime beside it is
-  # enough -- and unlike -static it avoids MinGW's static winpthread, whose
-  # nanosleep disagrees with the headers about struct timespec.
-  if(MINGW)
-    get_filename_component(_sm64_cxx_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    foreach(_dll libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll libatomic-1.dll)
-      if(EXISTS "${_sm64_cxx_dir}/${_dll}")
-        add_custom_command(TARGET sm64_foundation POST_BUILD
-          COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                  "${_sm64_cxx_dir}/${_dll}" "$<TARGET_FILE_DIR:sm64_foundation>"
-          COMMENT "Staging ${_dll} next to sm64_foundation")
-      endif()
-    endforeach()
-  endif()
-  set_target_properties(sm64_foundation PROPERTIES
-    CXX_STANDARD 20
-    CXX_EXTENSIONS OFF  
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-  target_compile_definitions(sm64_foundation PRIVATE SM64_FOUNDATION_HOST=1)
-  message(STATUS "SM64: foundation port ENABLED (source=${FOUNDATION_SOURCE_DIR})")
 endif()
+set_target_properties(sm64_foundation PROPERTIES
+  CXX_STANDARD 20
+  CXX_EXTENSIONS OFF
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+target_compile_definitions(sm64_foundation PRIVATE SM64_FOUNDATION_HOST=1)
+message(STATUS "SM64: foundation port (source=${_foundation_src})")

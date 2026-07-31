@@ -32,9 +32,10 @@
 #include <SDL3/SDL.h>
 
 #include "sm64ex_host.h"          // sm64ex host embedding interface (PUBLIC include)
-#include "configfile.h"           // configSkipIntro (skip the intro cutscene by default)
+#include "configfile.h"           // configSkipIntro, configKey*, MAX_BINDS
+#include "gfx/gfx_screen_config.h" // DESIRED_SCREEN_WIDTH/HEIGHT for options-menu reset
 #include "audio/audio_sdl3.h"     // audio_api (SDL3 backend)
-#include "controller/controller_sdl3_keyboard.h"  // keyboard input backend
+#include "controller/controller_sdl3_keyboard.h"  // keyboard input backend + vk names
 #include "gfx/gfx_cc.h"
 #include "gfx/gfx_rendering_api.h"
 #include "gfx/gfx_window_manager_api.h"
@@ -70,7 +71,7 @@ static ExampleFpsCounter g_fps;
 static RendererUBO       g_ubo;
 static RendererConfig    g_cfg;
 static RendererOutputs   g_outputs;
-static ExampleRenderer   g_renderer = ExampleRenderer::Raster;
+static ExampleRenderer   g_renderer = ExampleRenderer::RealtimePT;
 
 // The captured game geometry is already in the game's view space, so the camera
 // sits at the origin. FOV comes from sFOVState each frame; aspect from our
@@ -259,7 +260,38 @@ static void wm_handle_events(void) {
     // hook is intentionally a no-op to avoid double-consuming the queue.
     // TODO: route keyboard/gamepad -> controller_api here.
 }
-static bool wm_start_frame(void) { return true; }
+static bool wm_start_frame(void) {
+    // Options menu (EXT_OPTIONS_MENU) flips these when the user hits Apply /
+    // Reset Window under Display. Honour them here since we own the SDL window.
+    if (configWindow.settings_changed) {
+        configWindow.settings_changed = false;
+        if (configWindow.reset) {
+            configWindow.reset = false;
+            configWindow.fullscreen = false;
+            configWindow.x = WAPI_WIN_CENTERPOS;
+            configWindow.y = WAPI_WIN_CENTERPOS;
+            configWindow.w = DESIRED_SCREEN_WIDTH;
+            configWindow.h = DESIRED_SCREEN_HEIGHT;
+            SDL_SetWindowFullscreen(g_window, 0);
+            SDL_SetWindowSize(g_window, (int)configWindow.w, (int)configWindow.h);
+            SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+        } else {
+            const bool isFs = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN) != 0;
+            if (configWindow.fullscreen != isFs)
+                SDL_SetWindowFullscreen(g_window,
+                                        configWindow.fullscreen ? SDL_WINDOW_FULLSCREEN : 0);
+            if (!configWindow.fullscreen) {
+                SDL_SetWindowSize(g_window, (int)configWindow.w, (int)configWindow.h);
+                const int xpos = (configWindow.x == WAPI_WIN_CENTERPOS)
+                                     ? SDL_WINDOWPOS_CENTERED : (int)configWindow.x;
+                const int ypos = (configWindow.y == WAPI_WIN_CENTERPOS)
+                                     ? SDL_WINDOWPOS_CENTERED : (int)configWindow.y;
+                SDL_SetWindowPosition(g_window, xpos, ypos);
+            }
+        }
+    }
+    return true;
+}
 static void wm_swap_buffers_begin(void) {}
 static void wm_swap_buffers_end(void) {}      // Foundation swaps internally.
 static double wm_get_time(void) {
@@ -701,9 +733,10 @@ static struct GfxRenderingAPI gfx_rendering_api = {
 // depth handling and blending differ, so the pass is parameterised rather than
 // duplicated.
 //
-// Both draw *into the lighting result* (g_outputs.diffuse) instead of the
-// backbuffer: they have to depth-test against the scene depth the rasterizer
-// produced, and the backbuffer/tonemap pass carries no depth attachment.
+// Both passes depth-test against the scene depth the rasterizer produced. The
+// skybox composites onto the lit HDR AOV (so it gets tonemapped with the scene),
+// while the HUD draws straight to the backbuffer after tonemapping - keeping the
+// game's own palette instead of running it through the tonemap curve.
 static constexpr uint32_t kOverlayZKeep = 0u;  // remap the game's vertex z
 static constexpr uint32_t kOverlayZFar = 1u;   // pin to the reverse-Z far plane
 
@@ -714,8 +747,9 @@ struct OverlayPushConstants {
 
 struct RasterizedPassDesc {
     const char* name = "Overlay";
-    ResourceHandle colorTarget{};  // post-lighting AOV we composite onto
+    ResourceHandle colorTarget{};  // post-lighting AOV we composite onto (ignored if toBackbuffer)
     RHIResourceFormat colorFormat = RHIResourceFormat::R16G16B16A16SignedFloat;
+    bool toBackbuffer = false;     // draw onto the swapchain backbuffer instead of colorTarget
     ResourceHandle sceneDepth{};   // scene depth, tested against but never written
     RHIExtent2D extent{};
     ResourceHandle vertexBuffer{};
@@ -736,12 +770,19 @@ static PassHandle CreateRasterizedPass(Renderer* renderer, const RendererResourc
     return renderer->CreatePass(
         desc.name, RHIDeviceQueueType::Graphics, desc.priority,
         [desc, gpuRes, shaderPath](PassHandle self, Renderer* r) {
-            r->BindTextureRTV(self, desc.colorTarget,
-                              {.format = desc.colorFormat,
-                               .range = RHITextureSubresourceRange::Create(
-                                   RHITextureAspectFlagBits::Color)},
-                              desc.blending ? PSD::Attachment::Blending::GetAlphaBlending()
-                                            : PSD::Attachment::Blending::GetNoBlending());
+            const auto blending = desc.blending ? PSD::Attachment::Blending::GetAlphaBlending()
+                                                : PSD::Attachment::Blending::GetNoBlending();
+            if (desc.toBackbuffer) {
+                // HUD: composite onto the tonemapped backbuffer in the game's own
+                // colour space, so the tonemap curve never touches the HUD palette.
+                r->BindBackbufferRTV(self, blending);
+            } else {
+                r->BindTextureRTV(self, desc.colorTarget,
+                                  {.format = desc.colorFormat,
+                                   .range = RHITextureSubresourceRange::Create(
+                                       RHITextureAspectFlagBits::Color)},
+                                  blending);
+            }
             // Read-only DSV: z-test on, z-write off for both overlay passes.
             r->BindTextureDSV(self, desc.sceneDepth,
                               {.format = RHIResourceFormat::D32SignedFloat,
@@ -830,9 +871,10 @@ static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
     BuildGPUSceneHostUpdatePass(ctx.renderer.get(), resources);
     Example_BuildExampleRenderer(g_renderer, ctx.renderer.get(), &g_ubo, resources, g_cfg, g_outputs);
 
-    // Screen-space layers, composited onto the lit AOV before tonemapping so
-    // they can depth-test against the scene depth: skybox first (behind all
-    // geometry), then the HUD on top of it.
+    // Screen-space layers. The skybox composites onto the lit HDR AOV so it gets
+    // tonemapped with the scene; the HUD draws straight to the backbuffer after
+    // tonemapping so its palette is untouched. Both still depth-test against the
+    // scene depth the rasterizer resolved (read-only DSV, z-write off).
     const RHIBufferDesc overlayVboDesc{
         .resource = {.heap = RHIDeviceHeapType::Upload,
                      .hostAccess = RHIResourceHostAccess::WriteOnly},
@@ -857,25 +899,106 @@ static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
     // plane so any rasterized geometry wins the depth test.
     skyboxDesc.zMode = kOverlayZFar;
     skyboxDesc.blending = false;
-    const PassHandle skyboxPass = CreateRasterizedPass(ctx.renderer.get(), resources, skyboxDesc);
+    CreateRasterizedPass(ctx.renderer.get(), resources, skyboxDesc);
+
+    // Tonemap the lit HDR AOV (skybox included) into the backbuffer *before* the
+    // HUD pass, so the HUD composites onto the already-display-encoded image.
+    Examples_BuildTonemappingPass(ctx.renderer.get(), g_outputs, true);
 
     RasterizedPassDesc uiDesc = overlayBase;
     uiDesc.name = "SM64 UI";
     uiDesc.vertexBuffer = g_ui_vbo;
     uiDesc.vertices = &g_ui_verts;
     // The HUD keeps the depth its own ortho matrix produced (dialog boxes and
-    // the pause menu rely on the game's own layering) and blends over the frame.
+    // the pause menu rely on the game's own layering), blends over the frame,
+    // and is emitted to the swapchain backbuffer (past the tonemap stage).
     uiDesc.zMode = kOverlayZKeep;
     uiDesc.blending = true;
-    const PassHandle uiPass = CreateRasterizedPass(ctx.renderer.get(), resources, uiDesc);
-    // Both passes read-modify-write the same AOV, so pin the ordering instead
-    // of relying on declaration order.
-    ctx.renderer->BindPass(uiPass, skyboxPass);
-
-    Examples_BuildTonemappingPass(ctx.renderer.get(), g_outputs, true);
+    uiDesc.toBackbuffer = true;
+    CreateRasterizedPass(ctx.renderer.get(), resources, uiDesc);
     RenderUtils::createCSDebugTextPassBackBuffer(ctx.renderer.get(), "Debug Text",
                                                  Examples_HudLines(g_input));
     ctx.renderer->EndSetup();
+}
+
+// Lit HUD token: green via Examples_Push/PopColor while `active`.
+static void HudLitText(ExampleInputState& input, StringView text, bool active, bool sameLine = true)
+{
+    if (active)
+        Examples_PushColor(input, 0, 255, 0);
+    Examples_Text(input, text);
+    if (active)
+        Examples_PopColor(input);
+    if (sameLine)
+        Examples_SameLine(input, 0);
+}
+
+#ifndef VK_INVALID
+#define VK_INVALID 0xFFFFu
+#endif
+#ifndef VK_BASE_SDL_GAMEPAD
+#define VK_BASE_SDL_GAMEPAD 0x1000u
+#endif
+
+// First configured bind for an action — prefer a keyboard VK so the HUD matches
+// what players type; fall back to whatever is bound (gamepad/mouse).
+static unsigned int FirstBind(const unsigned int binds[MAX_BINDS])
+{
+    for (int i = 0; i < MAX_BINDS; ++i) {
+        if (binds[i] != VK_INVALID && binds[i] < VK_BASE_SDL_GAMEPAD)
+            return binds[i];
+    }
+    for (int i = 0; i < MAX_BINDS; ++i) {
+        if (binds[i] != VK_INVALID)
+            return binds[i];
+    }
+    return VK_INVALID;
+}
+
+static const char* BindLabel(const unsigned int binds[MAX_BINDS])
+{
+    return keyboard_sdl3_vk_name(FirstBind(binds));
+}
+
+// One controls row driven by sm64ex_host_get_input() (merged keyboard + gamepad).
+// Labels come from configKey* so they track the Options > Controls remaps.
+static void HudControlsRow(ExampleInputState& input, SM64ExHostInput const& pad)
+{
+    constexpr int16_t kStickDeadzone = 8;
+    const bool stickLeft = pad.stickX <= -kStickDeadzone;
+    const bool stickRight = pad.stickX >= kStickDeadzone;
+    const bool stickDown = pad.stickY <= -kStickDeadzone;
+    const bool stickUp = pad.stickY >= kStickDeadzone;
+    auto btn = [&](uint16_t mask) { return (pad.buttonDown & mask) != 0; };
+
+    HudLitText(input, BindLabel(configKeyStickUp), stickUp);
+    HudLitText(input, BindLabel(configKeyStickLeft), stickLeft);
+    HudLitText(input, BindLabel(configKeyStickDown), stickDown);
+    HudLitText(input, BindLabel(configKeyStickRight), stickRight);
+    Examples_Text(input, " move | ");
+    Examples_SameLine(input, 0);
+    HudLitText(input, BindLabel(configKeyA), btn(SM64EX_BTN_A));
+    Examples_Text(input, " jump | ");
+    Examples_SameLine(input, 0);
+    HudLitText(input, BindLabel(configKeyB), btn(SM64EX_BTN_B));
+    Examples_Text(input, " action | ");
+    Examples_SameLine(input, 0);
+    HudLitText(input, BindLabel(configKeyZ), btn(SM64EX_BTN_Z));
+    Examples_Text(input, " crouch | ");
+    Examples_SameLine(input, 0);
+    HudLitText(input, BindLabel(configKeyCUp), btn(SM64EX_BTN_C_UP));
+    HudLitText(input, BindLabel(configKeyCLeft), btn(SM64EX_BTN_C_LEFT));
+    HudLitText(input, BindLabel(configKeyCDown), btn(SM64EX_BTN_C_DOWN));
+    HudLitText(input, BindLabel(configKeyCRight), btn(SM64EX_BTN_C_RIGHT));
+    Examples_Text(input, " cam | ");
+    Examples_SameLine(input, 0);
+    HudLitText(input, BindLabel(configKeyStart), btn(SM64EX_BTN_START));
+    Examples_Text(input, " Start | ");
+    Examples_SameLine(input, 0);
+    HudLitText(input, BindLabel(configKeyL), btn(SM64EX_BTN_L));
+    Examples_Text(input, "/");
+    Examples_SameLine(input, 0);
+    HudLitText(input, BindLabel(configKeyR), btn(SM64EX_BTN_R), /*sameLine=*/false);
 }
 
 // EndScene resolves every slot BeginScene handed out, so the counts must match
@@ -919,7 +1042,7 @@ int main(int argc, char** argv) {
     (void)argv;
 
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO);
-    g_window = SDL_CreateWindow(FOUNDATION_APPLICATION_TITLE("sm64ex Foundation"), 1280, 720,
+    g_window = SDL_CreateWindow("Super Mario 64 EX (Foundation) - INTERNAL EVALUATION BUILD", 1280, 720,
                                 Examples_SDLWindowFlagsVulkan);
     auto ctx = Examples_InitVulkan(g_window, argc, argv, RendererDesc{});
 
@@ -974,6 +1097,8 @@ int main(int argc, char** argv) {
     // Build the render graph once up front (the resize path only rebuilds it).
     // This also fills g_cfg.renderExtent used for the camera aspect ratio.
     RebuildGraph(ctx, gpu);
+
+    const String deviceName = ctx.device->QueryDeviceString();
 
     // Fixed refresh
     static constexpr uint64_t kTargetFps = 30;
@@ -1048,11 +1173,17 @@ int main(int argc, char** argv) {
 
         CommitScene(gpu, liveBuckets);
 
-        Examples_Text(g_input, Format("sm64ex Foundation | {:.0f} FPS | game {} tris | skybox {} | ui {} tris ({} batches)",
+        SM64ExHostInput pad{};
+        sm64ex_host_get_input(&pad);
+
+        Examples_PushScale(g_input, 1);
+        Examples_Text(g_input, Format("{:.0f} FPS | game {} tris | skybox {} | ui {} tris ({} batches)",
                                       g_fps.Update(), g_captured_tris, g_skybox_tris, g_ui_tris, g_ui_batches.size()));
         Examples_Text(g_input, Format("FOV {:.1f} deg | frame {} | {}/{} material buckets | {} textures",
                                       degrees(g_camera.fovY), ctx.renderer->GetFrame(), g_live_buckets,
                                       kMaxBuckets, g_tex_by_hash.size()));
+        HudControlsRow(g_input, pad);
+        Examples_Text(g_input, deviceName);
         if (g_dropped_tris)
             Examples_Text(g_input, Format("dropped game triangles ({} tri / {} bucket budget)", kMaxTris,
                                           kMaxBuckets));
@@ -1067,6 +1198,8 @@ int main(int argc, char** argv) {
         // Examples_NewFrame below has recorded and submitted the graph.
         if (Examples_RendererSwitchButton(g_input, g_renderer))
             g_input.wantResizeOrRebuild = true;
+        if (g_renderer == ExampleRenderer::ProgressivePT)
+            g_renderer = ExampleRenderer::Raster; // Wrap back since we don't want *that* here...
 
         Examples_NewFrame(g_window, ctx);
 

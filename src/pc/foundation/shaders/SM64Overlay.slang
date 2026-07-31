@@ -48,6 +48,8 @@ Vertex vertMain(
     // GL clip space z in [-w, w] -> Vulkan [0, w], then reversed so that the
     // near plane maps to 1 and the far plane to 0 like the rest of the frame.
     float z = (pc.zMode == kZModeFar) ? 0.0f : (pos.w - pos.z) * 0.5f;
+    // Title/Advertise
+    if (pos.z >= 0.5f && pc.zMode == kZModeFar) z = 1.0f;
 
     output.pos = float4(pos.x, pos.y, z, pos.w);
     output.uv = uv;
@@ -62,6 +64,8 @@ float4 fragMain(Vertex vtx) : SV_Target
     float4 color = vtx.color;
     if (vtx.texId >= 0)
         color *= gTextures2D[NonUniformResourceIndex(uint(vtx.texId))].Sample(textureSampler, vtx.uv);
+    else
+        color *= 0.25f;
     if (color.a <= pc.alphaRef)
         discard;
     return color;

@@ -24,6 +24,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +33,35 @@ extern "C" {
 struct GfxRenderingAPI;
 struct GfxWindowManagerAPI;
 struct AudioAPI;
+
+// Snapshot of player-1 pad state after the latest sm64ex_host_frame().
+// buttonDown / buttonPressed use the N64 CONT_* masks (see SM64EX_BTN_*).
+struct SM64ExHostInput {
+    uint16_t buttonDown;
+    uint16_t buttonPressed;
+    int16_t stickX;      // raw stick, roughly [-128, 127]
+    int16_t stickY;
+    int16_t extStickX;   // C-stick / right stick when present
+    int16_t extStickY;
+};
+
+// Same bit layout as include/PR/os_cont.h CONT_* / A_BUTTON etc.
+enum {
+    SM64EX_BTN_A      = 0x8000,
+    SM64EX_BTN_B      = 0x4000,
+    SM64EX_BTN_Z      = 0x2000,
+    SM64EX_BTN_START  = 0x1000,
+    SM64EX_BTN_D_UP   = 0x0800,
+    SM64EX_BTN_D_DOWN = 0x0400,
+    SM64EX_BTN_D_LEFT = 0x0200,
+    SM64EX_BTN_D_RIGHT= 0x0100,
+    SM64EX_BTN_L      = 0x0020,
+    SM64EX_BTN_R      = 0x0010,
+    SM64EX_BTN_C_UP   = 0x0008,
+    SM64EX_BTN_C_DOWN = 0x0004,
+    SM64EX_BTN_C_LEFT = 0x0002,
+    SM64EX_BTN_C_RIGHT= 0x0001,
+};
 
 struct SM64ExHostConfig {
     // Required. Same vtables the built-in backends implement; see
@@ -63,6 +93,10 @@ void sm64ex_host_frame(void);
 void sm64ex_host_deinit(void);
 
 bool sm64ex_host_is_inited(void);
+
+// Fills *out with gPlayer1Controller's current state (keyboard + gamepad merged).
+// Safe to call when not inited: writes zeros.
+void sm64ex_host_get_input(struct SM64ExHostInput *out);
 
 #ifdef __cplusplus
 }

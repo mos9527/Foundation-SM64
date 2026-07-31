@@ -23,6 +23,11 @@ void keyboard_sdl3_set_callbacks(kb_callback_t on_key_down, kb_callback_t on_key
 // sm64ex expects and dispatches it to the registered callbacks.
 void keyboard_sdl3_event(SDL_Event *event);
 
+// Human-readable label for a configKey* virtual key (keyboard / gamepad /
+// mouse). Returns a stable pointer valid until the next call that needs the
+// hex fallback buffer; safe to use for a single HUD frame's worth of labels.
+const char *keyboard_sdl3_vk_name(unsigned int vk);
+
 #ifdef __cplusplus
 }
 #endif

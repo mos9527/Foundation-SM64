@@ -195,3 +195,23 @@ void sm64ex_host_deinit(void) {
 bool sm64ex_host_is_inited(void) {
     return inited;
 }
+
+void sm64ex_host_get_input(struct SM64ExHostInput *out) {
+    if (!out)
+        return;
+    if (!inited || !gPlayer1Controller) {
+        out->buttonDown = 0;
+        out->buttonPressed = 0;
+        out->stickX = 0;
+        out->stickY = 0;
+        out->extStickX = 0;
+        out->extStickY = 0;
+        return;
+    }
+    out->buttonDown = gPlayer1Controller->buttonDown;
+    out->buttonPressed = gPlayer1Controller->buttonPressed;
+    out->stickX = gPlayer1Controller->rawStickX;
+    out->stickY = gPlayer1Controller->rawStickY;
+    out->extStickX = gPlayer1Controller->extStickX;
+    out->extStickY = gPlayer1Controller->extStickY;
+}
