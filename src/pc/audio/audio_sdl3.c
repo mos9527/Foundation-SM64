@@ -15,9 +15,16 @@
 static SDL_AudioStream *stream;
 
 static bool audio_sdl_init(void) {
-    if (SDL_Init(SDL_INIT_AUDIO) != 0) {
-        fprintf(stderr, "SDL audio init error: %s\n", SDL_GetError());
-        return false;
+    // The host already brings up SDL with VIDEO | GAMEPAD | AUDIO (mirroring
+    // SM64.cpp's single SDL_Init call). We only need to make sure the audio
+    // subsystem is present; this is additive and safe to call repeatedly.
+    // Unlike SDL2/SDL1 backends we do NOT treat a non-zero return here as fatal:
+    // SDL3's SDL_OpenAudioDeviceStream auto-initialises the audio subsystem, and
+    // a lone SDL_Init(AUDIO) failure was silently dropping all sound. The real
+    // gate is whether the stream below actually opens.
+    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+        fprintf(stderr, "[sdl3-audio] SDL_InitSubSystem(AUDIO) failed (non-fatal): %s\n",
+                SDL_GetError());
     }
 
     // 32000 Hz, native-endian signed 16-bit, stereo -- matches what the game's
@@ -29,10 +36,13 @@ static bool audio_sdl_init(void) {
     spec.channels = 2;
     stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, NULL, NULL);
     if (stream == NULL) {
-        fprintf(stderr, "SDL_OpenAudioDeviceStream error: %s\n", SDL_GetError());
+        fprintf(stderr, "[sdl3-audio] SDL_OpenAudioDeviceStream failed: %s\n", SDL_GetError());
         return false;
     }
-    SDL_ResumeAudioStreamDevice(stream);
+    if (!SDL_ResumeAudioStreamDevice(stream)) {
+        fprintf(stderr, "[sdl3-audio] SDL_ResumeAudioStreamDevice failed: %s\n", SDL_GetError());
+    }
+    fprintf(stderr, "[sdl3-audio] stream opened OK (freq=%d ch=%d)\n", spec.freq, spec.channels);
     return true;
 }
 
@@ -49,9 +59,26 @@ static int audio_sdl_get_desired_buffered(void) {
 static void audio_sdl_play(const uint8_t *buf, size_t len) {
     if (stream == NULL)
         return;
-    if (audio_sdl_buffered() < 6000) {
-        // Don't flood the audio buffer if the consumer is falling behind.
-        SDL_PutAudioStreamData(stream, buf, (int)len);
+    if (audio_sdl_buffered() >= 6000) {
+        return; // consumer is keeping up; don't flood the queue
+    }
+    if (!SDL_PutAudioStreamData(stream, buf, (int)len)) {
+        fprintf(stderr, "[sdl3-audio] SDL_PutAudioStreamData failed: %s\n", SDL_GetError());
+        return;
+    }
+    // Diagnostic: confirm the game is actually producing non-silent audio.
+    static int s_log = 0;
+    if (s_log < 8) {
+        const int16_t *p = (const int16_t *)buf;
+        int n = (int)(len / 2);
+        int peak = 0;
+        for (int i = 0; i < n; ++i) {
+            int v = p[i] < 0 ? -p[i] : p[i];
+            if (v > peak) peak = v;
+        }
+        fprintf(stderr, "[sdl3-audio] play #%d len=%zu peak=%d queued=%d\n",
+                s_log, len, peak, audio_sdl_buffered());
+        ++s_log;
     }
 }
 

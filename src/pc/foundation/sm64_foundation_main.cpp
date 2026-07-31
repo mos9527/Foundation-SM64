@@ -214,7 +214,10 @@ static void OnSdlEvent(SDL_Event* event) {
 }
 
 static void wm_init(const char* title) {
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
+    // Init AUDIO together with VIDEO/GAMEPAD (one call), matching SM64.cpp's
+    // SDL_Init(VIDEO | GAMEPAD | AUDIO). Initialising the audio subsystem
+    // separately later can fail on some setups, which silently disabled sound.
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO);
     keyboard_sdl3_init();
     // The window is created by main() (before Foundation/Vulkan init). The host
     // calls init() again during sm64ex_host_init, after the window exists, so
@@ -679,7 +682,7 @@ int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
 
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO);
     g_window = SDL_CreateWindow(FOUNDATION_APPLICATION_TITLE("sm64ex Foundation"), 1280, 720,
                                 Examples_SDLWindowFlagsVulkan);
     auto ctx = Examples_InitVulkan(g_window, argc, argv, RendererDesc{});
