@@ -169,12 +169,16 @@ static std::vector<UiBatch> g_skybox_batches;
 static uint32_t g_skybox_tris = 0;
 static bool g_dropped_skybox = false;
 
-// UI overlay vertex buffer (recreated on each RebuildGraph; the renderer owns
-// the underlying memory). Bound as a vertex buffer and updated per-frame via
-// cmd->UpdateBuffer from the captured g_ui_verts soup.
+// Overlay vertex buffers (recreated on each RebuildGraph; the renderer owns the
+// underlying memory). Both are Upload-heap buffers bound as vertex buffers and
+// refilled per-frame from the captured screen-space soups.
 static constexpr size_t kUiVboCapacity = 1u << 17;  // 131072 verts
 static constexpr size_t kUiVboCapacityBytes = kUiVboCapacity * sizeof(UiVertex);
 static ResourceHandle g_ui_vbo{};
+static ResourceHandle g_skybox_vbo{};
+// One global sampler for the overlay passes; N64 tile clamping is already baked
+// into the UVs at capture time, so a plain repeat/linear sampler is enough.
+static ResourceHandle g_overlay_sampler{};
 
 // gfx_pc hands out its own texture ids and re-uploads onto a recycled id when
 // its cache wraps, so the GPUScene texture is keyed by content hash and the id
@@ -689,6 +693,129 @@ static struct GfxRenderingAPI gfx_rendering_api = {
 };
 
 // ===========================================================================
+// Screen-space overlay passes (skybox / UI)
+// ===========================================================================
+// Skybox and HUD both reach us as ortho triangles that gfx_pc already
+// transformed into N64/OpenGL clip space, so they share a single pipeline: one
+// interleaved UiVertex stream sampling the GPUScene bindless texture pool. Only
+// depth handling and blending differ, so the pass is parameterised rather than
+// duplicated.
+//
+// Both draw *into the lighting result* (g_outputs.diffuse) instead of the
+// backbuffer: they have to depth-test against the scene depth the rasterizer
+// produced, and the backbuffer/tonemap pass carries no depth attachment.
+static constexpr uint32_t kOverlayZKeep = 0u;  // remap the game's vertex z
+static constexpr uint32_t kOverlayZFar = 1u;   // pin to the reverse-Z far plane
+
+struct OverlayPushConstants {
+    uint32_t zMode;
+    float alphaRef;
+};
+
+struct RasterizedPassDesc {
+    const char* name = "Overlay";
+    ResourceHandle colorTarget{};  // post-lighting AOV we composite onto
+    RHIResourceFormat colorFormat = RHIResourceFormat::R16G16B16A16SignedFloat;
+    ResourceHandle sceneDepth{};   // scene depth, tested against but never written
+    RHIExtent2D extent{};
+    ResourceHandle vertexBuffer{};
+    ResourceHandle sampler{};
+    const std::vector<UiVertex>* vertices = nullptr;
+    uint32_t zMode = kOverlayZKeep;
+    bool blending = false;
+    float alphaRef = 1.0f / 255.0f;
+    size_t priority = 0;
+};
+
+static PassHandle CreateRasterizedPass(Renderer* renderer, const RendererResources& gpuRes,
+                                       const RasterizedPassDesc& desc) {
+    using PSD = RHIPipelineState::PipelineStateDesc;
+    const auto shaderPath =
+        renderer->GetApplication()->ResolveRelativePathBase("Data/Shaders/SM64Overlay.spv");
+
+    return renderer->CreatePass(
+        desc.name, RHIDeviceQueueType::Graphics, desc.priority,
+        [desc, gpuRes, shaderPath](PassHandle self, Renderer* r) {
+            r->BindTextureRTV(self, desc.colorTarget,
+                              {.format = desc.colorFormat,
+                               .range = RHITextureSubresourceRange::Create(
+                                   RHITextureAspectFlagBits::Color)},
+                              desc.blending ? PSD::Attachment::Blending::GetAlphaBlending()
+                                            : PSD::Attachment::Blending::GetNoBlending());
+            // Read-only DSV: z-test on, z-write off for both overlay passes.
+            r->BindTextureDSV(self, desc.sceneDepth,
+                              {.format = RHIResourceFormat::D32SignedFloat,
+                               .range = RHITextureSubresourceRange::Create(
+                                   RHITextureAspectFlagBits::Depth)},
+                              /*readOnly=*/true);
+            r->BindBufferCopyDst(self, desc.vertexBuffer);
+            r->BindShader(self, RHIShaderStageBits::Vertex, "vertMain", shaderPath);
+            r->BindShader(self, RHIShaderStageBits::Fragment, "fragMain", shaderPath);
+            r->BindPushConstant(self, RHIShaderStageBits::Vertex | RHIShaderStageBits::Fragment, 0,
+                                sizeof(OverlayPushConstants));
+            r->BindDescriptorSetRead(self, "gTextures2D",
+                                     gpuRes.textures2D->GetDescriptorSetLayout());
+            r->BindTextureSampler(self, desc.sampler, "textureSampler");
+            r->BindVertexInput(
+                self, {.bindings = {{{sizeof(UiVertex), false}}},
+                       .attributes = {{
+                           {.location = 0,
+                            .offset = offsetof(UiVertex, px),
+                            .format = RHIResourceFormat::R32G32B32A32SignedFloat},
+                           {.location = 1,
+                            .offset = offsetof(UiVertex, u),
+                            .format = RHIResourceFormat::R32G32SignedFloat},
+                           {.location = 2,
+                            .offset = offsetof(UiVertex, r),
+                            .format = RHIResourceFormat::R32G32B32A32SignedFloat},
+                           {.location = 3,
+                            .offset = offsetof(UiVertex, texId),
+                            .format = RHIResourceFormat::R32SignedFloat},
+                       }}});
+            // gfx_pc has already applied the game's own culling, and the ortho
+            // layers are authored two-sided, so leave winding alone.
+            // Reverse-Z GreaterEqual: a skybox pinned to z = 0 still passes on
+            // background pixels (depth cleared to 0) but loses to any geometry.
+            r->PassSetRasterizerFlags(self, {.cullMode = PSD::Rasterizer::CullNone},
+                                      {.depthFormat = RHIResourceFormat::D32SignedFloat,
+                                       .depthTest = true,
+                                       .depthWrite = false,
+                                       .depthCompareOp = PSD::DepthStencil::GreaterEqual});
+        },
+        [desc, gpuRes](PassHandle self, Renderer* r, RHICommandList* cmd) {
+            auto* vbo = r->DerefResource(desc.vertexBuffer).Get<RHIBuffer*>();
+            const size_t vertexCount =
+                std::min(desc.vertices->size(), kUiVboCapacityBytes / sizeof(UiVertex));
+            if (vertexCount > 0) {
+                std::memcpy(vbo->Map<char>(), desc.vertices->data(),
+                            vertexCount * sizeof(UiVertex));
+                vbo->Flush();
+            }
+
+            // Load both attachments: we composite on top of the lit frame and
+            // reuse the depth the rasterizer already resolved.
+            r->CmdBeginGraphics(self, cmd, desc.extent, {{{RHIAttachmentLoadOp::Load}}},
+                                {RHIAttachmentLoadOp::Load, {0.0f, 0u}});
+            r->CmdSetPipeline(self, cmd);
+            if (vertexCount > 0) {
+                // flipY: gfx_pc emits GL-style clip space (+Y up), so let the
+                // viewport do the flip instead of touching the game matrices.
+                cmd->SetViewport(0, 0, (float)desc.extent.x, (float)desc.extent.y, 0.0f, 1.0f,
+                                 /*flipY=*/true);
+                cmd->SetScissor(0, 0, desc.extent.x, desc.extent.y);
+                r->CmdBindDescriptorSet(self, cmd, "gTextures2D",
+                                        gpuRes.textures2D->GetDescriptorSet());
+                const OverlayPushConstants pc{desc.zMode, desc.alphaRef};
+                r->CmdSetPushConstant(
+                    self, cmd, RHIShaderStageBits::Vertex | RHIShaderStageBits::Fragment, 0, pc);
+                cmd->BindVertexBuffer(0, {{vbo}}, {{0}});
+                cmd->Draw((uint32_t)vertexCount);
+            }
+            cmd->EndGraphics();
+        });
+}
+
+// ===========================================================================
 // Foundation render-graph helpers (mirrored from SM64.cpp)
 // ===========================================================================
 static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
@@ -702,6 +829,49 @@ static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
     auto resources = CreateGPUSceneRendererResources(ctx.renderer.get(), &gpu);
     BuildGPUSceneHostUpdatePass(ctx.renderer.get(), resources);
     Example_BuildExampleRenderer(g_renderer, ctx.renderer.get(), &g_ubo, resources, g_cfg, g_outputs);
+
+    // Screen-space layers, composited onto the lit AOV before tonemapping so
+    // they can depth-test against the scene depth: skybox first (behind all
+    // geometry), then the HUD on top of it.
+    const RHIBufferDesc overlayVboDesc{
+        .resource = {.heap = RHIDeviceHeapType::Upload,
+                     .hostAccess = RHIResourceHostAccess::WriteOnly},
+        .usage = RHIBufferUsageBits::VertexBuffer | RHIBufferUsageBits::TransferDestination,
+        .size = kUiVboCapacityBytes};
+    g_skybox_vbo = ctx.renderer->CreateResource("SM64 Skybox VBO", overlayVboDesc);
+    g_ui_vbo = ctx.renderer->CreateResource("SM64 UI VBO", overlayVboDesc);
+    g_overlay_sampler = ctx.renderer->CreateSampler({});
+
+    RasterizedPassDesc overlayBase{};
+    overlayBase.colorTarget = g_outputs.diffuse;
+    overlayBase.colorFormat = g_outputs.aovFormat;
+    overlayBase.sceneDepth = g_outputs.depth;
+    overlayBase.extent = g_outputs.extent;
+    overlayBase.sampler = g_overlay_sampler;
+
+    RasterizedPassDesc skyboxDesc = overlayBase;
+    skyboxDesc.name = "SM64 Skybox";
+    skyboxDesc.vertexBuffer = g_skybox_vbo;
+    skyboxDesc.vertices = &g_skybox_verts;
+    // The skybox has no meaningful depth of its own - force it onto the far
+    // plane so any rasterized geometry wins the depth test.
+    skyboxDesc.zMode = kOverlayZFar;
+    skyboxDesc.blending = false;
+    const PassHandle skyboxPass = CreateRasterizedPass(ctx.renderer.get(), resources, skyboxDesc);
+
+    RasterizedPassDesc uiDesc = overlayBase;
+    uiDesc.name = "SM64 UI";
+    uiDesc.vertexBuffer = g_ui_vbo;
+    uiDesc.vertices = &g_ui_verts;
+    // The HUD keeps the depth its own ortho matrix produced (dialog boxes and
+    // the pause menu rely on the game's own layering) and blends over the frame.
+    uiDesc.zMode = kOverlayZKeep;
+    uiDesc.blending = true;
+    const PassHandle uiPass = CreateRasterizedPass(ctx.renderer.get(), resources, uiDesc);
+    // Both passes read-modify-write the same AOV, so pin the ordering instead
+    // of relying on declaration order.
+    ctx.renderer->BindPass(uiPass, skyboxPass);
+
     Examples_BuildTonemappingPass(ctx.renderer.get(), g_outputs, true);
     RenderUtils::createCSDebugTextPassBackBuffer(ctx.renderer.get(), "Debug Text",
                                                  Examples_HudLines(g_input));
@@ -892,7 +1062,9 @@ int main(int argc, char** argv) {
             Examples_Text(g_input, Format("dropped UI triangles past the {} budget", kMaxUiTris));
         if (g_dropped_skybox)
             Examples_Text(g_input, Format("dropped skybox triangles past the {} budget", kMaxUiTris));
-        // UI overlay pass commits g_ui_batches / g_ui_verts (see RebuildGraph).
+        // The skybox / UI passes upload g_skybox_verts and g_ui_verts straight
+        // from their record callbacks, so the soups have to stay alive until
+        // Examples_NewFrame below has recorded and submitted the graph.
         if (Examples_RendererSwitchButton(g_input, g_renderer))
             g_input.wantResizeOrRebuild = true;
 

@@ -235,16 +235,29 @@ if(SM64_FOUNDATION_PORT)
   set(FOUNDATION_ROOT_DIR "${_foundation_src}" CACHE PATH "Foundation source root" FORCE)
   # Slang shader toolchain (same as Foundation/Examples): compiles .slang -> .spv
   # into the runtime Data/Shaders dir, where the host resolves shaders at load.
-  include("${FOUNDATION_ROOT_DIR}/slangc_compile.cmake")
+  # The module lives under Source/ in current Foundation trees but used to sit at
+  # the repo root, so accept either layout instead of hard-failing at configure.
+  if(EXISTS "${FOUNDATION_ROOT_DIR}/Source/slangc_compile.cmake")
+    set(FOUNDATION_INCLUDE_DIR "${FOUNDATION_ROOT_DIR}/Source")
+  else()
+    set(FOUNDATION_INCLUDE_DIR "${FOUNDATION_ROOT_DIR}")
+  endif()
+  include("${FOUNDATION_INCLUDE_DIR}/slangc_compile.cmake")
   set(SHADER_BUILD_DIR "${CMAKE_BINARY_DIR}/bin/Data/Shaders")
   file(MAKE_DIRECTORY "${SHADER_BUILD_DIR}")
+  # Screen-space overlay shader used by the skybox and UI passes.
+  slangc_compile(Shader_SM64Overlay
+    SOURCE "${SM64_ROOT}/src/pc/foundation/shaders/SM64Overlay.slang"
+    OUTPUT_DIR "${SHADER_BUILD_DIR}"
+    OUTPUT_NAME "SM64Overlay"
+    INCLUDE_DIRS "${FOUNDATION_INCLUDE_DIR}/Renderer/Shaders")
   # sm64ex compiles the SDL3 gamepad backend; give it the SDL3 headers/libs and
   # the CAPI_SDL3 switch so controller_sdl3.c (and its registration in
   # controller_entry_point.c) are active only on the Foundation host.
   target_compile_definitions(sm64ex PRIVATE CAPI_SDL3=1 AAPI_SDL3=1)
   target_link_libraries(sm64ex PRIVATE SDL3::SDL3)
   add_executable(sm64_foundation src/pc/foundation/sm64_foundation_main.cpp)
-  foreach(_dep Foundation_Shaders Editor_Data Shader_PostprocessBasic)
+  foreach(_dep Foundation_Shaders Editor_Data Shader_PostprocessBasic Shader_SM64Overlay)
     if(TARGET ${_dep})
       add_dependencies(sm64_foundation ${_dep})
     endif()
@@ -252,7 +265,7 @@ if(SM64_FOUNDATION_PORT)
   target_include_directories(sm64_foundation PRIVATE
     "${SM64_ROOT}/src/pc/gfx"
     "${SM64_ROOT}/src/pc"
-    "${FOUNDATION_ROOT_DIR}")
+    "${FOUNDATION_INCLUDE_DIR}")
   target_link_libraries(sm64_foundation PRIVATE
     sm64ex            
     Example_Common    
