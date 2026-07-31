@@ -962,7 +962,8 @@ static const char* BindLabel(const unsigned int binds[MAX_BINDS])
 
 // One controls row driven by sm64ex_host_get_input() (merged keyboard + gamepad).
 // Labels come from configKey* so they track the Options > Controls remaps.
-static void HudControlsRow(ExampleInputState& input, SM64ExHostInput const& pad)
+// On the title screen (levelNum == 1) the whole row blinks red/white at 1 Hz.
+static void HudControlsRow(ExampleInputState& input, SM64ExHostInput const& pad, int16_t levelNum)
 {
     constexpr int16_t kStickDeadzone = 8;
     const bool stickLeft = pad.stickX <= -kStickDeadzone;
@@ -970,6 +971,15 @@ static void HudControlsRow(ExampleInputState& input, SM64ExHostInput const& pad)
     const bool stickDown = pad.stickY <= -kStickDeadzone;
     const bool stickUp = pad.stickY >= kStickDeadzone;
     auto btn = [&](uint16_t mask) { return (pad.buttonDown & mask) != 0; };
+
+    const bool titleBlink = (levelNum == 1);
+    const bool blink = std::fmod(Examples_GetTime(), 1.0f) < 0.5f;
+    if (titleBlink) {
+        if (blink)
+            Examples_PushColor(input, 255, 0, 0);
+        else
+            Examples_PushColor(input, 255, 255, 255);
+    }
 
     HudLitText(input, BindLabel(configKeyStickUp), stickUp);
     HudLitText(input, BindLabel(configKeyStickLeft), stickLeft);
@@ -999,6 +1009,39 @@ static void HudControlsRow(ExampleInputState& input, SM64ExHostInput const& pad)
     Examples_Text(input, "/");
     Examples_SameLine(input, 0);
     HudLitText(input, BindLabel(configKeyR), btn(SM64EX_BTN_R), /*sameLine=*/false);
+
+    if (titleBlink)
+        Examples_PopColor(input);
+}
+
+static const char* PlayModeLabel(int16_t mode)
+{
+    switch (mode) {
+    case SM64EX_PLAY_MODE_NORMAL:        return "normal";
+    case SM64EX_PLAY_MODE_PAUSED:        return "paused";
+    case SM64EX_PLAY_MODE_CHANGE_AREA:   return "change-area";
+    case SM64EX_PLAY_MODE_CHANGE_LEVEL:  return "change-level";
+    case SM64EX_PLAY_MODE_FRAME_ADVANCE: return "frame-advance";
+    default:                             return "unknown";
+    }
+}
+
+static void HudGameStateRows(ExampleInputState& input, SM64ExHostGameState const& st)
+{
+    // Health wedges are the upper byte of the raw health word (0x0880 == 8).
+    const int wedges = (st.health >> 8) & 0xFF;
+    Examples_Text(input,
+                  Format("lvl {} area {} course {} act {} | {} | file {}",
+                         st.levelNum, st.areaIndex, st.courseNum, st.actNum,
+                         PlayModeLabel(st.playMode), st.saveFileNum));
+    Examples_Text(input,
+                  Format("pos {:.0f},{:.0f},{:.0f} vel {:.1f},{:.1f},{:.1f} fwd {:.1f} yaw {} act {:08X}",
+                         st.posX, st.posY, st.posZ, st.velX, st.velY, st.velZ, st.forwardVel,
+                         st.faceYaw, st.action));
+    Examples_Text(input,
+                  Format("HP {}/8 lives {} coins {} stars {} keys {} | hud L{} C{} S{} W{} T{}",
+                         wedges, st.lives, st.coins, st.stars, st.keys, st.hudLives, st.hudCoins,
+                         st.hudStars, st.hudWedges, st.hudTimer));
 }
 
 // EndScene resolves every slot BeginScene handed out, so the counts must match
@@ -1175,6 +1218,8 @@ int main(int argc, char** argv) {
 
         SM64ExHostInput pad{};
         sm64ex_host_get_input(&pad);
+        SM64ExHostGameState game{};
+        sm64ex_host_get_game_state(&game);
 
         Examples_PushScale(g_input, 1);
         Examples_Text(g_input, Format("{:.0f} FPS | game {} tris | skybox {} | ui {} tris ({} batches)",
@@ -1182,7 +1227,8 @@ int main(int argc, char** argv) {
         Examples_Text(g_input, Format("FOV {:.1f} deg | frame {} | {}/{} material buckets | {} textures",
                                       degrees(g_camera.fovY), ctx.renderer->GetFrame(), g_live_buckets,
                                       kMaxBuckets, g_tex_by_hash.size()));
-        HudControlsRow(g_input, pad);
+        HudGameStateRows(g_input, game);
+        HudControlsRow(g_input, pad, game.levelNum);
         Examples_Text(g_input, deviceName);
         if (g_dropped_tris)
             Examples_Text(g_input, Format("dropped game triangles ({} tri / {} bucket budget)", kMaxTris,

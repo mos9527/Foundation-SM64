@@ -15,6 +15,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "sm64.h"
 
@@ -38,6 +39,8 @@
 #include "game/game_init.h"
 #include "game/main.h"
 #include "game/thread6.h"
+#include "game/level_update.h"
+#include "game/area.h"
 
 #include "sm64ex_host.h"
 
@@ -214,4 +217,41 @@ void sm64ex_host_get_input(struct SM64ExHostInput *out) {
     out->stickY = gPlayer1Controller->rawStickY;
     out->extStickX = gPlayer1Controller->extStickX;
     out->extStickY = gPlayer1Controller->extStickY;
+}
+
+void sm64ex_host_get_game_state(struct SM64ExHostGameState *out) {
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    if (!inited || !gMarioState)
+        return;
+
+    out->levelNum = gCurrLevelNum;
+    out->areaIndex = gCurrAreaIndex;
+    out->courseNum = gCurrCourseNum;
+    out->actNum = gCurrActNum;
+    out->playMode = sCurrPlayMode;
+    out->saveFileNum = gCurrSaveFileNum;
+
+    out->posX = gMarioState->pos[0];
+    out->posY = gMarioState->pos[1];
+    out->posZ = gMarioState->pos[2];
+    out->velX = gMarioState->vel[0];
+    out->velY = gMarioState->vel[1];
+    out->velZ = gMarioState->vel[2];
+    out->forwardVel = gMarioState->forwardVel;
+    out->faceYaw = gMarioState->faceAngle[1];
+    out->action = gMarioState->action;
+
+    out->health = gMarioState->health;
+    out->lives = gMarioState->numLives;
+    out->coins = gMarioState->numCoins;
+    out->stars = gMarioState->numStars;
+    out->keys = gMarioState->numKeys;
+
+    out->hudLives = gHudDisplay.lives;
+    out->hudCoins = gHudDisplay.coins;
+    out->hudStars = gHudDisplay.stars;
+    out->hudWedges = gHudDisplay.wedges;
+    out->hudTimer = gHudDisplay.timer;
 }

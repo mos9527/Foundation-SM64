@@ -84,3 +84,4 @@ sm64config.txt
 
 build-cmake/
 cmake-*/
+packages/

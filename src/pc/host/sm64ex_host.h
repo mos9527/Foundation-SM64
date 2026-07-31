@@ -45,6 +45,36 @@ struct SM64ExHostInput {
     int16_t extStickY;
 };
 
+// Snapshot of high-level game / Mario state after the latest sm64ex_host_frame().
+// Mirrors the live globals (gMarioState, gHudDisplay, area/course selectors);
+// values may be stale or zero during menus / before Mario has spawned.
+struct SM64ExHostGameState {
+    int16_t levelNum;     // gCurrLevelNum
+    int16_t areaIndex;    // gCurrAreaIndex
+    int16_t courseNum;    // gCurrCourseNum
+    int16_t actNum;       // gCurrActNum
+    int16_t playMode;     // sCurrPlayMode (see SM64EX_PLAY_MODE_*)
+    int16_t saveFileNum;  // gCurrSaveFileNum (1-based)
+
+    float posX, posY, posZ;
+    float velX, velY, velZ;
+    float forwardVel;
+    int16_t faceYaw;      // Mario faceAngle[1], s16 angle units
+    uint32_t action;      // Mario action id (ACT_* in include/sm64.h)
+
+    int16_t health;       // raw health (0x0880 == full 8 wedges)
+    int16_t lives;
+    int16_t coins;
+    int16_t stars;
+    int16_t keys;
+
+    int16_t hudLives;
+    int16_t hudCoins;
+    int16_t hudStars;
+    int16_t hudWedges;    // power meter wedges shown on HUD
+    uint16_t hudTimer;
+};
+
 // Same bit layout as include/PR/os_cont.h CONT_* / A_BUTTON etc.
 enum {
     SM64EX_BTN_A      = 0x8000,
@@ -61,6 +91,15 @@ enum {
     SM64EX_BTN_C_DOWN = 0x0004,
     SM64EX_BTN_C_LEFT = 0x0002,
     SM64EX_BTN_C_RIGHT= 0x0001,
+};
+
+// Matches PLAY_MODE_* in src/game/level_update.c.
+enum {
+    SM64EX_PLAY_MODE_NORMAL       = 0,
+    SM64EX_PLAY_MODE_PAUSED       = 2,
+    SM64EX_PLAY_MODE_CHANGE_AREA  = 3,
+    SM64EX_PLAY_MODE_CHANGE_LEVEL = 4,
+    SM64EX_PLAY_MODE_FRAME_ADVANCE = 5,
 };
 
 struct SM64ExHostConfig {
@@ -97,6 +136,10 @@ bool sm64ex_host_is_inited(void);
 // Fills *out with gPlayer1Controller's current state (keyboard + gamepad merged).
 // Safe to call when not inited: writes zeros.
 void sm64ex_host_get_input(struct SM64ExHostInput *out);
+
+// Fills *out with Mario / level / HUD globals after the latest frame.
+// Safe to call when not inited: writes zeros.
+void sm64ex_host_get_game_state(struct SM64ExHostGameState *out);
 
 #ifdef __cplusplus
 }
