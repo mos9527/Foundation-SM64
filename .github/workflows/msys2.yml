@@ -25,6 +25,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
+          path-type: inherit
           install: make
           pacboy: >-
             toolchain:p
@@ -55,6 +56,11 @@ jobs:
           "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
           "$sdkPath\Bin" >> $env:GITHUB_PATH
           & (Join-Path $sdkPath "Bin\slangc.exe") -v
+
+      - name: Verify slangc in MSYS2
+        run: |
+          command -v slangc
+          slangc -v
 
       - name: Download US baserom
         run: |
