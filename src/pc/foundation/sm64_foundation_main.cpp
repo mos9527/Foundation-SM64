@@ -418,7 +418,14 @@ static void ra_set_sampler_parameters(int tile, bool /*linearFilter*/, uint32_t 
 }
 static void ra_set_depth_test(bool) {}
 static void ra_set_depth_mask(bool) {}
-static void ra_set_zmode_decal(bool) {}
+
+// N64 decal surfaces (shadows, paintings, floor markings) are authored exactly
+// coplanar with what they sit on and rely on this bias to win the depth test.
+// Must clear FP16 vertex quantization (relative step 2^-11) to survive
+// FQVertex::Pack; the rest is headroom.
+static constexpr float kDecalDepthBias = 2e-3f;
+static bool g_zmode_decal = false;
+static void ra_set_zmode_decal(bool zmode_decal) { g_zmode_decal = zmode_decal; }
 static void ra_set_viewport(int, int, int, int) {}
 static void ra_set_scissor(int, int, int, int) {}
 static void ra_set_use_alpha(bool use_alpha) { g_use_alpha = use_alpha; }
@@ -613,14 +620,21 @@ static void CaptureGameBatch(float buf_vbo[], size_t buf_vbo_len, size_t num_tri
             texIndex = it->second.index;
     }
 
+    // Uniformly scaling a view-space position is a pure depth offset: the camera
+    // sits at the origin, so the perspective divide cancels the scale in x/y and
+    // only NDC z moves. Shrinking pulls the decal toward the camera.
+    const float decalScale = g_zmode_decal ? (1.0f - kDecalDepthBias) : 1.0f;
+
     for (size_t t = 0; t < num_tris; ++t) {
         if (g_captured_tris >= kMaxTris) {
             g_dropped_tris = true;
             return;
         }
         const float* p = pos3d + t * 9u;
-        const float3 p0(p[0], p[1], p[2]), p1(p[3], p[4], p[5]), p2(p[6], p[7], p[8]);
-        const float3 n = cross(p1 - p0, p2 - p0);
+        const float3 tri[3] = {float3(p[0], p[1], p[2]) * decalScale,
+                               float3(p[3], p[4], p[5]) * decalScale,
+                               float3(p[6], p[7], p[8]) * decalScale};
+        const float3 n = cross(tri[1] - tri[0], tri[2] - tri[0]);
         const float nlen = length(n);
         if (nlen < 1e-8f)
             continue;
@@ -648,7 +662,7 @@ static void CaptureGameBatch(float buf_vbo[], size_t buf_vbo_len, size_t num_tri
 
         for (uint32_t v = 0; v < 3; ++v) {
             FVertex fv{};
-            fv.position = float3(p[v * 3 + 0], p[v * 3 + 1], p[v * 3 + 2]);
+            fv.position = tri[v];
             fv.normal = n / nlen;
             if (textured) {
                 const float* vtx = buf_vbo + (t * 3u + v) * stride;
