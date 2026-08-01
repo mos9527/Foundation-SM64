@@ -24,6 +24,7 @@ struct PushConstants
 {
     uint zMode;
     float alphaRef; // fragments with alpha <= alphaRef are discarded
+    uint gamma; // outputs as gamma-encoded color
 };
 
 [[vk::push_constant]] PushConstants pc;
@@ -68,5 +69,5 @@ float4 fragMain(Vertex vtx) : SV_Target
         color *= 0.25f;
     if (color.a <= pc.alphaRef)
         discard;
-    return color;
+    return pc.gamma ? pow(color, 1/2.2f) : color;
 }

@@ -39,6 +39,7 @@
 #include "gfx/gfx_cc.h"
 #include "gfx/gfx_rendering_api.h"
 #include "gfx/gfx_window_manager_api.h"
+#include "cheats.h"
 
 #include <Core/Allocator.hpp>     // GLOBAL_ALLOC
 #include <Renderer/Renderer.hpp>
@@ -71,7 +72,8 @@ static ExampleFpsCounter g_fps;
 static RendererUBO       g_ubo;
 static RendererConfig    g_cfg;
 static RendererOutputs   g_outputs;
-static ExampleRenderer   g_renderer = ExampleRenderer::RealtimePT;
+static ExampleRenderer   g_renderer = ExampleRenderer::Raster;
+static bool              g_showHud = true;
 
 // The captured game geometry is already in the game's view space, so the camera
 // sits at the origin. FOV comes from sFOVState each frame; aspect from our
@@ -757,6 +759,7 @@ static constexpr uint32_t kOverlayZFar = 1u;   // pin to the reverse-Z far plane
 struct OverlayPushConstants {
     uint32_t zMode;
     float alphaRef;
+    uint gamma;
 };
 
 struct RasterizedPassDesc {
@@ -773,6 +776,7 @@ struct RasterizedPassDesc {
     bool blending = false;
     float alphaRef = 1.0f / 255.0f;
     size_t priority = 0;
+    bool gamma = false;
 };
 
 static PassHandle CreateRasterizedPass(Renderer* renderer, const RendererResources& gpuRes,
@@ -861,7 +865,7 @@ static PassHandle CreateRasterizedPass(Renderer* renderer, const RendererResourc
                 cmd->SetScissor(0, 0, desc.extent.x, desc.extent.y);
                 r->CmdBindDescriptorSet(self, cmd, "gTextures2D",
                                         gpuRes.textures2D->GetDescriptorSet());
-                const OverlayPushConstants pc{desc.zMode, desc.alphaRef};
+                const OverlayPushConstants pc{desc.zMode, desc.alphaRef, desc.gamma};
                 r->CmdSetPushConstant(
                     self, cmd, RHIShaderStageBits::Vertex | RHIShaderStageBits::Fragment, 0, pc);
                 cmd->BindVertexBuffer(0, {{vbo}}, {{vboOffset}});
@@ -930,6 +934,7 @@ static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
     uiDesc.zMode = kOverlayZKeep;
     uiDesc.blending = true;
     uiDesc.toBackbuffer = true;
+    uiDesc.gamma = true;
     CreateRasterizedPass(ctx.renderer.get(), resources, uiDesc);
     RenderUtils::createCSDebugTextPassBackBuffer(ctx.renderer.get(), "Debug Text",
                                                  Examples_HudLines(g_input));
@@ -1023,7 +1028,8 @@ static void HudControlsRow(ExampleInputState& input, SM64ExHostInput const& pad,
     HudLitText(input, BindLabel(configKeyL), btn(SM64EX_BTN_L));
     Examples_Text(input, "/");
     Examples_SameLine(input, 0);
-    HudLitText(input, BindLabel(configKeyR), btn(SM64EX_BTN_R), /*sameLine=*/false);
+    HudLitText(input, BindLabel(configKeyR), btn(SM64EX_BTN_R));
+    Examples_Text(input, " | Tab hide HUD");
 
     if (titleBlink)
         Examples_PopColor(input);
@@ -1148,6 +1154,7 @@ int main(int argc, char** argv) {
     // Foundation port: skip the intro cutscene / castle jingle by default.
     // Mirrors the original port's --skip-intro CLI flag without needing args.
     configSkipIntro = true;
+    Cheats.EnableCheats = true;
 
     // sm64ex never enables backface culling, so its geometry is authored
     // double-sided; culling it here punches holes in the level.
@@ -1239,37 +1246,44 @@ int main(int argc, char** argv) {
         SM64ExHostGameState game{};
         sm64ex_host_get_game_state(&game);
 
-        Examples_PushScale(g_input, 1);
-        Examples_Text(g_input, Format("{:.0f} FPS | game {} tris | skybox {} | ui {} tris ({} batches)",
-                                      g_fps.Update(), g_captured_tris, g_skybox_tris, g_ui_tris, g_ui_batches.size()));
-        Examples_Text(g_input, Format("FOV {:.1f} deg | frame {} | {}/{} material buckets | {} textures",
-                                      degrees(g_camera.fovY), ctx.renderer->GetFrame(), g_live_buckets,
-                                      kMaxBuckets, g_tex_by_hash.size()));
-        size_t gpuMemoryUsed = 0;
-        size_t gpuMemoryBudget = 0;
-        ctx.device->QueryBudget(RHIDeviceHeapType::Local, gpuMemoryUsed, gpuMemoryBudget);
-        constexpr double kBytesPerMiB = 1024.0 * 1024.0;
-        Examples_Text(g_input, Format("GPU memory {:.1f} / {:.1f} MiB",
-                                      gpuMemoryUsed / kBytesPerMiB, gpuMemoryBudget / kBytesPerMiB));
-        HudGameStateRows(g_input, game);
-        HudControlsRow(g_input, pad, game.levelNum);
-        Examples_Text(g_input, deviceName);
-        if (g_dropped_tris)
-            Examples_Text(g_input, Format("dropped game triangles ({} tri / {} bucket budget)", kMaxTris,
-                                          kMaxBuckets));
-        if (g_dropped_textures)
-            Examples_Text(g_input, Format("dropped textures past the {} budget", 4096));
-        if (g_dropped_ui)
-            Examples_Text(g_input, Format("dropped UI triangles past the {} budget", kMaxUiTris));
-        if (g_dropped_skybox)
-            Examples_Text(g_input, Format("dropped skybox triangles past the {} budget", kMaxUiTris));
-        // The skybox / UI passes upload g_skybox_verts and g_ui_verts straight
-        // from their record callbacks, so the soups have to stay alive until
-        // Examples_NewFrame below has recorded and submitted the graph.
-        if (Examples_RendererSwitchButton(g_input, g_renderer))
-            g_input.wantResizeOrRebuild = true;
-        if (g_renderer == ExampleRenderer::ProgressivePT)
-            g_renderer = ExampleRenderer::Raster; // Wrap back since we don't want *that* here...
+        if (g_input.KeyPressed(SDLK_TAB))
+            g_showHud = !g_showHud;
+
+        // Always tick FPS so the counter stays accurate while the HUD is hidden.
+        const float fps = g_fps.Update();
+        if (g_showHud) {
+            Examples_PushScale(g_input, 1);
+            Examples_Text(g_input, Format("{:.0f} FPS | game {} tris | skybox {} | ui {} tris ({} batches)",
+                                          fps, g_captured_tris, g_skybox_tris, g_ui_tris, g_ui_batches.size()));
+            Examples_Text(g_input, Format("FOV {:.1f} deg | frame {} | {}/{} material buckets | {} textures",
+                                          degrees(g_camera.fovY), ctx.renderer->GetFrame(), g_live_buckets,
+                                          kMaxBuckets, g_tex_by_hash.size()));
+            size_t gpuMemoryUsed = 0;
+            size_t gpuMemoryBudget = 0;
+            ctx.device->QueryBudget(RHIDeviceHeapType::Local, gpuMemoryUsed, gpuMemoryBudget);
+            constexpr double kBytesPerMiB = 1024.0 * 1024.0;
+            Examples_Text(g_input, Format("{} memory {:.1f} / {:.1f} MiB",
+                                          deviceName, gpuMemoryUsed / kBytesPerMiB, gpuMemoryBudget / kBytesPerMiB));
+            HudGameStateRows(g_input, game);
+            HudControlsRow(g_input, pad, game.levelNum);
+
+            if (g_dropped_tris)
+                Examples_Text(g_input, Format("dropped game triangles ({} tri / {} bucket budget)", kMaxTris,
+                                              kMaxBuckets));
+            if (g_dropped_textures)
+                Examples_Text(g_input, Format("dropped textures past the {} budget", 4096));
+            if (g_dropped_ui)
+                Examples_Text(g_input, Format("dropped UI triangles past the {} budget", kMaxUiTris));
+            if (g_dropped_skybox)
+                Examples_Text(g_input, Format("dropped skybox triangles past the {} budget", kMaxUiTris));
+            // The skybox / UI passes upload g_skybox_verts and g_ui_verts straight
+            // from their record callbacks, so the soups have to stay alive until
+            // Examples_NewFrame below has recorded and submitted the graph.
+            if (Examples_RendererSwitchButton(g_input, g_renderer))
+                g_input.wantResizeOrRebuild = true;
+            if (g_renderer == ExampleRenderer::ProgressivePT)
+                g_renderer = ExampleRenderer::Raster; // Wrap back since we don't want *that* here...
+        }
 
         Examples_NewFrame(g_window, ctx);
 
