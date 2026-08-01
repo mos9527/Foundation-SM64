@@ -119,7 +119,7 @@ static constexpr uint32_t kMaxUiTris = 4096u;
 // material buckets: each bucket owns a dynamic geometry of kBucketVerts and is
 // committed as its own instance. Buckets are handed out in order every frame
 // and recycled, so bucket N is a different material from frame to frame.
-static constexpr uint32_t kMaxBuckets = 1024;
+static constexpr uint32_t kMaxBuckets = 2048;
 static constexpr uint32_t kBucketVerts = 3072u;
 static constexpr uint32_t kInvalidBucket = ~0u;
 static constexpr uint32_t kNoTexture = ~0u;
