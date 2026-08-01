@@ -1,0 +1,86 @@
+name: Windows MSYS2
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  VULKAN_SDK_VERSION: "1.4.350.0"
+
+jobs:
+  build:
+    name: Windows x64 (MSYS2 UCRT64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          pacboy: >-
+            toolchain:p
+            cmake:p
+            ninja:p
+            python:p
+            git:p
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $version = "${{ env.VULKAN_SDK_VERSION }}"
+          $installer = Join-Path $env:RUNNER_TEMP "VulkanSDK.exe"
+          $url = "https://sdk.lunarg.com/sdk/download/$version/windows/vulkansdk-windows-X64-$version.exe"
+
+          Write-Host "Downloading Vulkan SDK $version ..."
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          Write-Host "Installing Vulkan SDK ..."
+          Start-Process -FilePath $installer `
+            -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" `
+            -Wait -NoNewWindow
+
+          $sdkPath = "C:\VulkanSDK\$version"
+          if (-not (Test-Path (Join-Path $sdkPath "Bin\slangc.exe"))) {
+            throw "slangc.exe was not installed under $sdkPath"
+          }
+
+          "VULKAN_SDK=$sdkPath" >> $env:GITHUB_ENV
+          "$sdkPath\Bin" >> $env:GITHUB_PATH
+          & (Join-Path $sdkPath "Bin\slangc.exe") -v
+
+      - name: Download US baserom
+        run: |
+          curl --fail --location --retry 3 --output baserom.us.z64 \
+            "https://github.com/jb1361/Super-Mario-64-AI/raw/refs/heads/development/Super%20Mario%2064%20(USA).z64"
+          test -s baserom.us.z64
+
+      - name: Extract assets
+        run: python extract_assets.py us
+
+      - name: Configure CMake
+        run: |
+          cmake -B build-cmake -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DFOUNDATION_WITH_PROFILING=OFF \
+            -DFOUNDATION_RHIVULKAN_VALIDATION_LAYER=OFF
+
+      - name: Build sm64_foundation
+        run: cmake --build build-cmake --target sm64_foundation
+
+      - name: Package build
+        run: python package.py build-cmake -o packages/Foundation-sm64-windows-msys2.zip
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Foundation-sm64-windows-msys2
+          path: packages/Foundation-sm64-windows-msys2.zip
+          if-no-files-found: error
+          compression-level: 9

@@ -1099,8 +1099,8 @@ int main(int argc, char** argv) {
     desc.instanceBudget = 4096;
     desc.materialBudget = 4096;
     desc.lightBudget = 8;
-    desc.geometryBudget = kMaxBuckets + 8u;
-    desc.tlasInstanceBudget = kMaxBuckets + 8u;
+    desc.geometryBudget = 4096;
+    desc.tlasInstanceBudget = 4096;
     desc.texturesBudget = 4096;
     GPUScene gpu(ctx.device.Get(), ctx.jobs.get(), GLOBAL_ALLOC, desc);
     g_gpu = &gpu;
