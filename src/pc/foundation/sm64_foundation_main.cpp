@@ -115,12 +115,28 @@ struct ShaderProgram {
 static constexpr uint32_t kMaxTris = 32768u;
 static constexpr uint32_t kMaxUiTris = 4096u;
 
+// Upper bound on frames the GPU may still be working on while the CPU prepares
+// the next one. Every GPUScene ring below is sized against this, *not* against a
+// live Renderer::GetFrameSwaps(): the swapchain is recreated behind our back on
+// resize / fullscreen (Examples_NewFrame -> SetSwapchain) and can come back with
+// a different image count, while GPUScene is constructed exactly once. Sizing a
+// ring to the image count observed at startup would silently under-allocate the
+// moment that count grows, and every CPU-side write below happens *before*
+// Renderer::BeginExecute() waits on a fence - nothing would catch the overrun.
+static constexpr uint32_t kMaxFramesInFlight = 5u;
+
 // One GSInstance references exactly one GSMaterial, so the frame is split into
 // material buckets: each bucket owns a dynamic geometry of kBucketVerts and is
 // committed as its own instance. Buckets are handed out in order every frame
 // and recycled, so bucket N is a different material from frame to frame.
+//
+// kBucketVerts is a hard per-frame cost, not just a capacity: GPUScene uploads
+// and refits the BLAS over a dynamic geometry's *whole* allocation, so unused
+// slack is re-uploaded and re-traced every frame. SM64 averages a handful of
+// triangles per material, and a bucket that fills up chains into a fresh one,
+// so keep this small and let chaining absorb the outliers.
 static constexpr uint32_t kMaxBuckets = 2048;
-static constexpr uint32_t kBucketVerts = 3072u;
+static constexpr uint32_t kBucketVerts = 384u;   // 128 triangles
 static constexpr uint32_t kInvalidBucket = ~0u;
 static constexpr uint32_t kNoTexture = ~0u;
 
@@ -129,7 +145,6 @@ struct Bucket {
     uint32_t texIndex = kNoTexture;   // GPUScene bindless texture index
     float4 color = float4(1.0f);      // baked shade / prim color
     uint32_t vertexCount = 0;         // filled this frame
-    uint32_t dirtyCount = 0;          // vertices left non-degenerate on the GPU
     bool indicesUploaded = false;
 };
 static Bucket g_buckets[kMaxBuckets];
@@ -175,7 +190,14 @@ static bool g_dropped_skybox = false;
 // Overlay vertex buffers (recreated on each RebuildGraph; the renderer owns the
 // underlying memory). Both are Upload-heap buffers bound as vertex buffers and
 // refilled per-frame from the captured screen-space soups.
-static constexpr size_t kUiVboCapacity = 1u << 17;  // 131072 verts
+//
+// The buffer holds kMaxFramesInFlight slots and the record callback writes the
+// one Renderer::GetSync() names, so the CPU never touches a slot the GPU is
+// still reading. Sizing the ring to GetFrameSwaps() at graph-build time is not
+// enough: a swapchain recreate can raise the image count (and therefore the
+// range of GetSync()) without a graph rebuild, which would run the memcpy and
+// the vertex-buffer offset past the end of the allocation.
+static constexpr size_t kUiVboCapacity = 1u << 14;  // 16384 verts (kMaxUiTris * 3 = 12288)
 static constexpr size_t kUiVboCapacityBytes = kUiVboCapacity * sizeof(UiVertex);
 static ResourceHandle g_ui_vbo{};
 static ResourceHandle g_skybox_vbo{};
@@ -886,11 +908,14 @@ static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
     // tonemapped with the scene; the HUD draws straight to the backbuffer after
     // tonemapping so its palette is untouched. Both still depth-test against the
     // scene depth the rasterizer resolved (read-only DSV, z-write off).
+    CHECK_MSG(ctx.renderer->GetFrameSwaps() <= kMaxFramesInFlight,
+              "swapchain reports {} images but the GPUScene rings and overlay VBOs are sized for {}",
+              ctx.renderer->GetFrameSwaps(), kMaxFramesInFlight);
     const RHIBufferDesc overlayVboDesc{
         .resource = {.heap = RHIDeviceHeapType::Upload,
                      .hostAccess = RHIResourceHostAccess::WriteOnly},
         .usage = RHIBufferUsageBits::VertexBuffer | RHIBufferUsageBits::TransferDestination,
-        .size = kUiVboCapacityBytes * ctx.renderer->GetFrameSwaps()};
+        .size = kUiVboCapacityBytes * kMaxFramesInFlight};
     g_skybox_vbo = ctx.renderer->CreateResource("SM64 Skybox VBO", overlayVboDesc);
     g_ui_vbo = ctx.renderer->CreateResource("SM64 UI VBO", overlayVboDesc);
     g_overlay_sampler = ctx.renderer->CreateSampler({});
@@ -1103,13 +1128,25 @@ int main(int argc, char** argv) {
     auto ctx = Examples_InitVulkan(g_window, argc, argv, RendererDesc{});
 
     // GPUScene init (mirrors SM64.cpp).
+    //
+    // Every ring below is sized against kMaxFramesInFlight rather than the
+    // swapchain image count: GPUScene is built once here and never rebuilt, but
+    // the swapchain (and with it the number of frames the CPU may run ahead) is
+    // recreated on every resize / fullscreen toggle. All the per-frame CPU
+    // writes into these rings happen before Renderer::BeginExecute() takes its
+    // fence, so an under-sized ring is an unpoliced write into memory the GPU is
+    // still reading, not an assert.
     GPUSceneDesc desc{};
-    const uint32_t framesInFlight = std::max(ctx.renderer->GetFrameSwaps(), 1u);
-    const uint32_t gpuSceneRingFrameSlack = framesInFlight + 1u;
+    const uint32_t gpuSceneRingFrameSlack = kMaxFramesInFlight + 1u;
+    // A dynamic geometry costs sizeof(FQVertex) per vertex plus one index each,
+    // and the staging ring has to hold a whole frame's worth of that.
+    constexpr uint32_t kBucketBytes =
+        kBucketVerts * static_cast<uint32_t>(sizeof(FQVertex) + sizeof(uint32_t));
+    constexpr uint32_t kFrameBytes = kMaxBuckets * kBucketBytes;
     desc.primitiveBudget = 1024u * 1024u;
-    desc.dynamicGeometryBudget = 128 * 1024u * 1024u;
-    desc.dynamicStagingBudget = 128 * 1024u * 1024u;
-    desc.dynamicStagingFramesInFlight = framesInFlight;
+    desc.dynamicGeometryBudget = kFrameBytes + kMaxBuckets * 4096u /* GSMesh header slack */;
+    desc.dynamicStagingBudget = kFrameBytes + (1u << 20);
+    desc.dynamicStagingFramesInFlight = kMaxFramesInFlight;
     // One instance/material/geometry per material bucket, plus headroom for the
     // per-frame instance & material rings.
     desc.instanceBudget = kMaxBuckets * gpuSceneRingFrameSlack;
@@ -1205,11 +1242,17 @@ int main(int argc, char** argv) {
         for (uint32_t i = 0; i < liveBuckets; ++i) {
             Bucket& bucket = g_buckets[i];
             FQVertex* verts = &g_bucket_verts[(size_t)i * kBucketVerts];
-            // Degenerate whatever this slot drew when it was last used, so stale
-            // triangles stop rendering.
-            for (uint32_t v = bucket.vertexCount; v < bucket.dirtyCount; ++v)
-                verts[v] = kDegenerateVertex;
-            bucket.dirtyCount = bucket.vertexCount;
+            // Collapse the unused tail onto the bucket's own first vertex. It has
+            // to be degenerated either way so stale triangles stop rendering, but
+            // *where* it degenerates decides the bucket's BLAS bounds: parked at
+            // the origin the box would stretch from the geometry back to the
+            // camera (which sits at the view-space origin), so every primary ray
+            // would start inside every bucket and the TLAS would cull nothing.
+            // Anchored to real geometry the box stays tight and the padding
+            // triangles are still zero-area, so they can never be hit.
+            const FQVertex anchor = bucket.vertexCount > 0 ? verts[0] : kDegenerateVertex;
+            for (uint32_t v = bucket.vertexCount; v < kBucketVerts; ++v)
+                verts[v] = anchor;
 
             gpu.UpdateDynamicMeshCPU(bucket.geo, Span<const FQVertex>{verts, kBucketVerts},
                                      bucket.indicesUploaded
@@ -1250,6 +1293,13 @@ int main(int argc, char** argv) {
             Examples_Text(g_input, Format("FOV {:.1f} deg | frame {} | {}/{} material buckets | {} textures",
                                           degrees(g_camera.fovY), ctx.renderer->GetFrame(), g_live_buckets,
                                           kMaxBuckets, g_tex_by_hash.size()));
+            // Buckets are re-uploaded and re-traced at their full allocation, so
+            // this is the triangle count the GPU actually pays for - watch it
+            // against the captured count above when tuning kBucketVerts.
+            Examples_Text(g_input,
+                          Format("BLAS {} updated ({} full rebuilds) | {} tris resident for {} drawn",
+                                 gpu.GetDynamicRefitCount(), gpu.GetDynamicRebuildCount(),
+                                 g_live_buckets * (kBucketVerts / 3u), g_captured_tris));
             size_t gpuMemoryUsed = 0;
             size_t gpuMemoryBudget = 0;
             ctx.device->QueryBudget(RHIDeviceHeapType::Local, gpuMemoryUsed, gpuMemoryBudget);
@@ -1293,6 +1343,7 @@ int main(int argc, char** argv) {
     sm64ex_host_deinit();
     g_gpu = nullptr;   // no texture uploads past this point
     Examples_DestroyVulkan(g_window, ctx);
+    g_window = nullptr;   // Examples_DestroyVulkan already destroyed it
     wm_shutdown();
     return 0;
 }
