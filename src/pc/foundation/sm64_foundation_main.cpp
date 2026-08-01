@@ -882,7 +882,7 @@ static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
     Examples_ResetRenderer(ctx, RendererDesc{});
     ctx.renderer->BeginSetup();
     g_cfg.renderExtent = ctx.renderer->GetSwapchainExtent();
-    g_ubo.ptMaxBounces = 2u;
+    g_ubo.ptMaxBounces = 4u;
     auto resources = CreateGPUSceneRendererResources(ctx.renderer.get(), &gpu);
     BuildGPUSceneHostUpdatePass(ctx.renderer.get(), resources);
     Example_BuildExampleRenderer(g_renderer, ctx.renderer.get(), &g_ubo, resources, g_cfg, g_outputs);
