@@ -1071,7 +1071,7 @@ static void CommitScene(GPUScene& gpu, uint32_t liveBuckets) {
         GSMaterial material{};
         material.baseColorFactor = bucket.color;
         material.metallicFactor = 0.0f;
-        material.roughnessFactor = 0.75f;
+        material.roughnessFactor = 1.0f;
         material.ior = 1.5f;
         if (bucket.texIndex != kNoTexture)
             material.baseColorTexture = bucket.texIndex;
