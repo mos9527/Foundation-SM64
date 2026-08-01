@@ -451,11 +451,6 @@ static void ra_set_render_layer(uint32_t tag) {
         // Throttled summary so we can confirm the three zones are distinct.
         const uint32_t now = SDL_GetTicks();
         if (now - g_last_pass_log > 1000) {
-            std::fprintf(stderr,
-                "[foundation] passes (last ~1s): skybox=%llu game=%llu ui=%llu tris\n",
-                (unsigned long long)g_pass_tris[FOUNDATION_PASS_SKYBOX],
-                (unsigned long long)g_pass_tris[FOUNDATION_PASS_GAME],
-                (unsigned long long)g_pass_tris[FOUNDATION_PASS_UI]);
             g_pass_tris[FOUNDATION_PASS_SKYBOX] = 0;
             g_pass_tris[FOUNDATION_PASS_GAME] = 0;
             g_pass_tris[FOUNDATION_PASS_UI] = 0;
