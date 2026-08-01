@@ -110,15 +110,15 @@ struct ShaderProgram {
 // Game draws: perspective + modelview -> view-space soup for GPUScene.
 // UI draws: screen-space / ortho (HUD, fill rects, text) kept as clip-space
 // triangles for a dedicated overlay pass (not committed yet).
-static constexpr uint32_t kMaxTris = 1u << 20u;
+static constexpr uint32_t kMaxTris = 32768u;
 static constexpr uint32_t kMaxUiTris = 4096u;
 
 // One GSInstance references exactly one GSMaterial, so the frame is split into
 // material buckets: each bucket owns a dynamic geometry of kBucketVerts and is
 // committed as its own instance. Buckets are handed out in order every frame
 // and recycled, so bucket N is a different material from frame to frame.
-static constexpr uint32_t kMaxBuckets = 1024u;
-static constexpr uint32_t kBucketVerts = 3072u;   // 1024 triangles
+static constexpr uint32_t kMaxBuckets = 1024;
+static constexpr uint32_t kBucketVerts = 3072u;
 static constexpr uint32_t kInvalidBucket = ~0u;
 static constexpr uint32_t kNoTexture = ~0u;
 
@@ -827,10 +827,11 @@ static PassHandle CreateRasterizedPass(Renderer* renderer, const RendererResourc
             auto* vbo = r->DerefResource(desc.vertexBuffer).Get<RHIBuffer*>();
             const size_t vertexCount =
                 std::min(desc.vertices->size(), kUiVboCapacityBytes / sizeof(UiVertex));
+            const size_t vboOffset = static_cast<size_t>(r->GetSync()) * kUiVboCapacityBytes;
             if (vertexCount > 0) {
-                std::memcpy(vbo->Map<char>(), desc.vertices->data(),
+                std::memcpy(vbo->Map<char>() + vboOffset, desc.vertices->data(),
                             vertexCount * sizeof(UiVertex));
-                vbo->Flush();
+                vbo->Flush(vboOffset, vertexCount * sizeof(UiVertex));
             }
 
             // Load both attachments: we composite on top of the lit frame and
@@ -849,7 +850,7 @@ static PassHandle CreateRasterizedPass(Renderer* renderer, const RendererResourc
                 const OverlayPushConstants pc{desc.zMode, desc.alphaRef};
                 r->CmdSetPushConstant(
                     self, cmd, RHIShaderStageBits::Vertex | RHIShaderStageBits::Fragment, 0, pc);
-                cmd->BindVertexBuffer(0, {{vbo}}, {{0}});
+                cmd->BindVertexBuffer(0, {{vbo}}, {{vboOffset}});
                 cmd->Draw((uint32_t)vertexCount);
             }
             cmd->EndGraphics();
@@ -879,7 +880,7 @@ static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
         .resource = {.heap = RHIDeviceHeapType::Upload,
                      .hostAccess = RHIResourceHostAccess::WriteOnly},
         .usage = RHIBufferUsageBits::VertexBuffer | RHIBufferUsageBits::TransferDestination,
-        .size = kUiVboCapacityBytes};
+        .size = kUiVboCapacityBytes * ctx.renderer->GetFrameSwaps()};
     g_skybox_vbo = ctx.renderer->CreateResource("SM64 Skybox VBO", overlayVboDesc);
     g_ui_vbo = ctx.renderer->CreateResource("SM64 UI VBO", overlayVboDesc);
     g_overlay_sampler = ctx.renderer->CreateSampler({});
@@ -1091,16 +1092,19 @@ int main(int argc, char** argv) {
 
     // GPUScene init (mirrors SM64.cpp).
     GPUSceneDesc desc{};
+    const uint32_t framesInFlight = std::max(ctx.renderer->GetFrameSwaps(), 1u);
+    const uint32_t gpuSceneRingFrameSlack = framesInFlight + 1u;
     desc.primitiveBudget = 1024u * 1024u;
     desc.dynamicGeometryBudget = 128 * 1024u * 1024u;
     desc.dynamicStagingBudget = 128 * 1024u * 1024u;
+    desc.dynamicStagingFramesInFlight = framesInFlight;
     // One instance/material/geometry per material bucket, plus headroom for the
     // per-frame instance & material rings.
-    desc.instanceBudget = 4096;
-    desc.materialBudget = 4096;
-    desc.lightBudget = 8;
-    desc.geometryBudget = 4096;
-    desc.tlasInstanceBudget = 4096;
+    desc.instanceBudget = kMaxBuckets * gpuSceneRingFrameSlack;
+    desc.materialBudget = kMaxBuckets * gpuSceneRingFrameSlack;
+    desc.lightBudget = 2u * gpuSceneRingFrameSlack;
+    desc.geometryBudget = kMaxBuckets;
+    desc.tlasInstanceBudget = kMaxBuckets * gpuSceneRingFrameSlack;
     desc.texturesBudget = 4096;
     GPUScene gpu(ctx.device.Get(), ctx.jobs.get(), GLOBAL_ALLOC, desc);
     g_gpu = &gpu;
@@ -1227,6 +1231,12 @@ int main(int argc, char** argv) {
         Examples_Text(g_input, Format("FOV {:.1f} deg | frame {} | {}/{} material buckets | {} textures",
                                       degrees(g_camera.fovY), ctx.renderer->GetFrame(), g_live_buckets,
                                       kMaxBuckets, g_tex_by_hash.size()));
+        size_t gpuMemoryUsed = 0;
+        size_t gpuMemoryBudget = 0;
+        ctx.device->QueryBudget(RHIDeviceHeapType::Local, gpuMemoryUsed, gpuMemoryBudget);
+        constexpr double kBytesPerMiB = 1024.0 * 1024.0;
+        Examples_Text(g_input, Format("GPU memory {:.1f} / {:.1f} MiB",
+                                      gpuMemoryUsed / kBytesPerMiB, gpuMemoryBudget / kBytesPerMiB));
         HudGameStateRows(g_input, game);
         HudControlsRow(g_input, pad, game.levelNum);
         Examples_Text(g_input, deviceName);
