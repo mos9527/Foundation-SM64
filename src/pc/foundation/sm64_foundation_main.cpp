@@ -72,7 +72,7 @@ static ExampleFpsCounter g_fps;
 static RendererUBO       g_ubo;
 static RendererConfig    g_cfg;
 static RendererOutputs   g_outputs;
-static ExampleRenderer   g_renderer = ExampleRenderer::Raster;
+static ExampleRenderer   g_renderer = ExampleRenderer::RealtimePT;
 static bool              g_showHud = true;
 
 // The captured game geometry is already in the game's view space, so the camera
