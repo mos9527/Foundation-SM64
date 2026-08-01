@@ -860,6 +860,10 @@ void geo_set_animation_globals(struct GraphNodeObject_sub *node, s32 hasAnimatio
  * the floor below it.
  */
 static void geo_process_shadow(struct GraphNodeShadow *node) {
+    // [Foundation] The port renders its own shadows, so the game's native shadow
+    // decals are disabled at the source: no display list is generated or appended
+    // to a master list. The original logic is kept below for reference.
+#if 0
     Gfx *shadowList;
     Gfx *shadowListInterpolated;
     Mat4 mtxf;
@@ -966,6 +970,7 @@ static void geo_process_shadow(struct GraphNodeShadow *node) {
             gMatStackIndex--;
         }
     }
+#endif
     if (node->node.children != NULL) {
         geo_process_node_and_siblings(node->node.children);
     }

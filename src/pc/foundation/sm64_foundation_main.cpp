@@ -882,10 +882,7 @@ static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
     Examples_ResetRenderer(ctx, RendererDesc{});
     ctx.renderer->BeginSetup();
     g_cfg.renderExtent = ctx.renderer->GetSwapchainExtent();
-    g_cfg.cullFlags &= ~CullFlagsBits::Backface;
     g_ubo.ptMaxBounces = 2u;
-    g_cfg.textureAnisoEnable = false;
-    g_cfg.textureTrilinear = false;
     auto resources = CreateGPUSceneRendererResources(ctx.renderer.get(), &gpu);
     BuildGPUSceneHostUpdatePass(ctx.renderer.get(), resources);
     Example_BuildExampleRenderer(g_renderer, ctx.renderer.get(), &g_ubo, resources, g_cfg, g_outputs);
@@ -922,7 +919,7 @@ static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
 
     // Tonemap the lit HDR AOV (skybox included) into the backbuffer *before* the
     // HUD pass, so the HUD composites onto the already-display-encoded image.
-    Examples_BuildTonemappingPass(ctx.renderer.get(), g_outputs, true);
+    Examples_BuildTonemappingPass(ctx.renderer.get(), &g_ubo, g_outputs, true);
 
     RasterizedPassDesc uiDesc = overlayBase;
     uiDesc.name = "SM64 UI";
@@ -1280,6 +1277,8 @@ int main(int argc, char** argv) {
             // from their record callbacks, so the soups have to stay alive until
             // Examples_NewFrame below has recorded and submitted the graph.
             if (Examples_RendererSwitchButton(g_input, g_renderer))
+                g_input.wantResizeOrRebuild = true;
+            if (Examples_RendererFlagsControls(g_input, g_renderer, g_cfg))
                 g_input.wantResizeOrRebuild = true;
             if (g_renderer == ExampleRenderer::ProgressivePT)
                 g_renderer = ExampleRenderer::Raster; // Wrap back since we don't want *that* here...
