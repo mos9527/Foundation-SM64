@@ -36,9 +36,12 @@ jobs:
           version="${{ env.VULKAN_SDK_VERSION }}"
           curl --fail --location --retry 3 --output vulkan-sdk.tar.xz \
             "https://sdk.lunarg.com/sdk/download/$version/linux/vulkansdk-linux-x86_64-$version.tar.xz"
-          sudo mkdir -p /opt/vulkan-sdk
-          sudo tar -xJf vulkan-sdk.tar.xz -C /opt/vulkan-sdk
-          slangc_path="$(find /opt/vulkan-sdk -type f -name slangc | head -n 1)"
+          # Extract into a runner-owned directory: with `sudo tar` the files end up
+          # owned by root and the `chmod`/execution below fail with EPERM.
+          sdk_root="$RUNNER_TEMP/vulkan-sdk"
+          mkdir -p "$sdk_root"
+          tar -xJf vulkan-sdk.tar.xz -C "$sdk_root"
+          slangc_path="$(find "$sdk_root" -type f -name slangc | head -n 1)"
           if [ -z "$slangc_path" ]; then
             echo "slangc not found in the Vulkan SDK tarball" >&2
             exit 1
