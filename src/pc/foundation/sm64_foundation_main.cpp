@@ -72,7 +72,8 @@ static ExampleFpsCounter g_fps;
 static RendererUBO       g_ubo;
 static RendererConfig    g_cfg;
 static RendererOutputs   g_outputs;
-static ExampleRenderer   g_renderer = ExampleRenderer::RealtimePT;
+// Default to the rasterizer; RealtimePT is opt-in via the HUD button (TAB).
+static ExampleRenderer   g_renderer = ExampleRenderer::Raster;
 // Render resolution as a fraction of the swapchain. Clamped by
 // Examples_MaxRenderScale() -- 480p on the short axis when running on Android.
 static float             g_renderScale = 1.0f;
