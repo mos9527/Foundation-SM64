@@ -73,6 +73,9 @@ static RendererUBO       g_ubo;
 static RendererConfig    g_cfg;
 static RendererOutputs   g_outputs;
 static ExampleRenderer   g_renderer = ExampleRenderer::RealtimePT;
+// Render resolution as a fraction of the swapchain. Clamped by
+// Examples_MaxRenderScale() -- 480p on the short axis when running on Android.
+static float             g_renderScale = 1.0f;
 static bool              g_showHud = true;
 
 // The captured game geometry is already in the game's view space, so the camera
@@ -204,6 +207,8 @@ static ResourceHandle g_skybox_vbo{};
 // One global sampler for the overlay passes; N64 tile clamping is already baked
 // into the UVs at capture time, so a plain repeat/linear sampler is enough.
 static ResourceHandle g_overlay_sampler{};
+// Depth attachment owned by the HUD pass (sized to the swapchain, see RebuildGraph).
+static ResourceHandle g_hud_depth{};
 
 // gfx_pc hands out its own texture ids and re-uploads onto a recycled id when
 // its cache wraps, so the GPUScene texture is keyed by content hash and the id
@@ -784,7 +789,11 @@ struct RasterizedPassDesc {
     ResourceHandle colorTarget{};  // post-lighting AOV we composite onto (ignored if toBackbuffer)
     RHIResourceFormat colorFormat = RHIResourceFormat::R16G16B16A16SignedFloat;
     bool toBackbuffer = false;     // draw onto the swapchain backbuffer instead of colorTarget
-    ResourceHandle sceneDepth{};   // scene depth, tested against but never written
+    ResourceHandle sceneDepth{};   // depth attachment; read-only scene depth unless ownDepth
+    // Pass-private depth: cleared and written by this pass, instead of testing
+    // against the (read-only) scene depth. Required when the pass runs at a
+    // different extent than the scene -- i.e. the HUD on the backbuffer.
+    bool ownDepth = false;
     RHIExtent2D extent{};
     ResourceHandle vertexBuffer{};
     ResourceHandle sampler{};
@@ -818,12 +827,14 @@ static PassHandle CreateRasterizedPass(Renderer* renderer, const RendererResourc
                                        RHITextureAspectFlagBits::Color)},
                                   blending);
             }
-            // Read-only DSV: z-test on, z-write off for both overlay passes.
+            // Scene depth is read-only (z-test on, z-write off). A pass with its own
+            // depth clears and writes it instead -- it cannot share the scene depth
+            // because Foundation requires every attachment to cover the pass extent.
             r->BindTextureDSV(self, desc.sceneDepth,
                               {.format = RHIResourceFormat::D32SignedFloat,
                                .range = RHITextureSubresourceRange::Create(
                                    RHITextureAspectFlagBits::Depth)},
-                              /*readOnly=*/true);
+                              /*readOnly=*/!desc.ownDepth);
             r->BindBufferCopyDst(self, desc.vertexBuffer);
             r->BindShader(self, RHIShaderStageBits::Vertex, "vertMain", shaderPath);
             r->BindShader(self, RHIShaderStageBits::Fragment, "fragMain", shaderPath);
@@ -855,7 +866,7 @@ static PassHandle CreateRasterizedPass(Renderer* renderer, const RendererResourc
             r->PassSetRasterizerFlags(self, {.cullMode = PSD::Rasterizer::CullNone},
                                       {.depthFormat = RHIResourceFormat::D32SignedFloat,
                                        .depthTest = true,
-                                       .depthWrite = false,
+                                       .depthWrite = desc.ownDepth,
                                        .depthCompareOp = PSD::DepthStencil::GreaterEqual});
         },
         [desc, gpuRes](PassHandle self, Renderer* r, RHICommandList* cmd) {
@@ -869,10 +880,12 @@ static PassHandle CreateRasterizedPass(Renderer* renderer, const RendererResourc
                 vbo->Flush(vboOffset, vertexCount * sizeof(UiVertex));
             }
 
-            // Load both attachments: we composite on top of the lit frame and
-            // reuse the depth the rasterizer already resolved.
+            // Load the color attachment: we composite on top of the lit frame.
+            // Scene-depth passes load the depth the rasterizer already resolved;
+            // a pass with its own depth clears it (0 == far in reverse-Z).
             r->CmdBeginGraphics(self, cmd, desc.extent, {{{RHIAttachmentLoadOp::Load}}},
-                                {RHIAttachmentLoadOp::Load, {0.0f, 0u}});
+                                {desc.ownDepth ? RHIAttachmentLoadOp::Clear : RHIAttachmentLoadOp::Load,
+                                 {0.0f, 0u}});
             r->CmdSetPipeline(self, cmd);
             if (vertexCount > 0) {
                 // flipY: gfx_pc emits GL-style clip space (+Y up), so let the
@@ -898,7 +911,12 @@ static PassHandle CreateRasterizedPass(Renderer* renderer, const RendererResourc
 static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
     Examples_ResetRenderer(ctx, RendererDesc{});
     ctx.renderer->BeginSetup();
-    g_cfg.renderExtent = ctx.renderer->GetSwapchainExtent();
+    // Render below the swapchain resolution when g_renderScale < 1; the tonemap
+    // blit upscales to the backbuffer. Examples_MaxRenderScale caps this at 480p
+    // on the short axis on Android -- write the clamped value back so the HUD
+    // slider shows the scale that is actually in effect.
+    g_renderScale = std::min(g_renderScale, Examples_MaxRenderScale(ctx.renderer->GetSwapchainExtent()));
+    g_cfg.renderExtent = Examples_RenderExtent(ctx.renderer->GetSwapchainExtent(), g_renderScale);
     g_ubo.ptMaxBounces = 4u;
     auto resources = CreateGPUSceneRendererResources(ctx.renderer.get(), &gpu);
     BuildGPUSceneHostUpdatePass(ctx.renderer.get(), resources);
@@ -952,6 +970,20 @@ static void RebuildGraph(ExampleVulkanContext& ctx, GPUScene& gpu) {
     uiDesc.blending = true;
     uiDesc.toBackbuffer = true;
     uiDesc.gamma = true;
+    // Unlike the skybox (which draws into the AOVs) the HUD targets the backbuffer,
+    // so it runs at the swapchain extent and not at the (possibly downscaled) render
+    // extent. That means it can't reuse the scene depth: Foundation rejects any pass
+    // whose extent exceeds an attachment's, so the HUD gets a depth buffer of its own
+    // at the swapchain size and resolves its own layering (dialog boxes, pause menu)
+    // inside the pass.
+    uiDesc.extent = ctx.renderer->GetSwapchainExtent();
+    g_hud_depth = ctx.renderer->CreateResource(
+        "SM64 UI Depth",
+        RHITextureDesc{.usage = RHITextureUsageBits::DepthStencil,
+                       .extent = {uiDesc.extent.x, uiDesc.extent.y, 1},
+                       .format = RHIResourceFormat::D32SignedFloat});
+    uiDesc.sceneDepth = g_hud_depth;
+    uiDesc.ownDepth = true;
     CreateRasterizedPass(ctx.renderer.get(), resources, uiDesc);
     RenderUtils::createCSDebugTextPassBackBuffer(ctx.renderer.get(), "Debug Text",
                                                  Examples_HudLines(g_input));
@@ -1122,10 +1154,31 @@ int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
 
+#if defined(__ANDROID__)
+    // Lock the activity to landscape. SDL forwards this hint to
+    // Activity.setRequestedOrientation() (SDLActivity.setOrientationBis), which is
+    // what SDL's own Android templates use on top of the manifest declaration.
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+#endif
+
     SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_AUDIO);
     g_window = SDL_CreateWindow("Super Mario 64 EX (Foundation) - INTERNAL EVALUATION BUILD", 1280, 720,
                                 Examples_SDLWindowFlagsVulkan);
     auto ctx = Examples_InitVulkan(g_window, argc, argv, RendererDesc{});
+
+#if defined(__ANDROID__)
+    // Android pre-rotation diagnostics (logcat -s SDL)
+    {
+        int ww = 0, wh = 0;
+        SDL_GetWindowSizeInPixels(g_window, &ww, &wh);
+        const RHIExtent2D swapExtent = ctx.renderer->GetSwapchainExtent();
+        const SDL_DisplayID display = SDL_GetPrimaryDisplay();
+        SDL_Log("SM64: window=%dx%d swapchain=%ux%u orientation(current)=%d orientation(natural)=%d",
+                ww, wh, swapExtent.x, swapExtent.y,
+                static_cast<int>(SDL_GetCurrentDisplayOrientation(display)),
+                static_cast<int>(SDL_GetNaturalDisplayOrientation(display)));
+    }
+#endif
 
     // GPUScene init (mirrors SM64.cpp).
     //
@@ -1318,17 +1371,26 @@ int main(int argc, char** argv) {
                 Examples_Text(g_input, Format("dropped UI triangles past the {} budget", kMaxUiTris));
             if (g_dropped_skybox)
                 Examples_Text(g_input, Format("dropped skybox triangles past the {} budget", kMaxUiTris));
-            // The skybox / UI passes upload g_skybox_verts and g_ui_verts straight
-            // from their record callbacks, so the soups have to stay alive until
-            // Examples_NewFrame below has recorded and submitted the graph.
-            if (Examples_RendererSwitchButton(g_input, g_renderer))
+            // Raster <-> RealtimePT only. Progressive PT is not offered: the game
+            // rewrites its entire scene every frame, so accumulation never converges.
+            if (Examples_Button(g_input, Format(">> Renderer: [{}] <<", g_renderer)))
+            {
+                g_renderer = g_renderer == ExampleRenderer::Raster ? ExampleRenderer::RealtimePT
+                                                                   : ExampleRenderer::Raster;
                 g_input.wantResizeOrRebuild = true;
+            }
             if (Examples_RendererFlagsControls(g_input, g_renderer, g_cfg))
                 g_input.wantResizeOrRebuild = true;
-            if (g_renderer == ExampleRenderer::ProgressivePT)
-                g_renderer = ExampleRenderer::Raster; // Wrap back since we don't want *that* here...
+            // Capped by Examples_MaxRenderScale (480p short axis on Android).
+            if (Examples_Slider(g_input, "Resolution", g_renderScale, 0.10f,
+                                Examples_MaxRenderScale(ctx.renderer->GetSwapchainExtent()),
+                                0.05f, "x", false))
+                g_input.wantResizeOrRebuild = true;
         }
 
+        // The skybox / UI passes upload g_skybox_verts and g_ui_verts straight from
+        // their record callbacks, so the soups have to stay alive until the graph
+        // below has been recorded and submitted.
         Examples_NewFrame(g_window, ctx);
 
         // Pace after present so swap cost is included (same as gfx_sdl2).
