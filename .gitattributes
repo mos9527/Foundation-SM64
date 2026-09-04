@@ -1,23 +1,5 @@
-# Set the default behavior, in case people don't have core.autocrlf set.
-* text=auto
-
-# List text files in case git doesn't characterize correctly
-*.c text
-*.h text
-*.s text
-*.in text
-*.js text
-*.md text
-*.py text
-*.sh text
-*.ld text
-*.inc text
-*.txt text
-*.json text
-*.yaml text
-
-# Same for binary
-*.bin binary
-*.m64 binary
-*.png binary
-*.aiff binary
+# Gradle's wrapper is a shell script - a CRLF checkout breaks it on any Unix box
+# that has core.autocrlf enabled.
+Android/gradlew text eol=lf
+Android/gradlew.bat text eol=crlf
+*.sh text eol=lf

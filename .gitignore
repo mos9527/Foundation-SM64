@@ -84,4 +84,18 @@ sm64config.txt
 
 build-cmake/
 cmake-*/
+build-android/
 packages/
+
+# Android
+*.apk
+*.aab
+Android/.gradle/
+Android/.idea/
+Android/local.properties
+Android/app/build/
+Android/app/.cxx/
+# Staged at build time by CMake (Foundation Data/ + SM64 shaders)
+Android/app/src/main/assets/
+
+build-*/

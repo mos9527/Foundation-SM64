@@ -1,0 +1,78 @@
+name: Android
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  VULKAN_SDK_VERSION: "1.4.350.0"
+
+jobs:
+  build:
+    name: Android arm64-v8a
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.10.2
+
+      # slangc compiles every .slang -> .spv on the host, both for Foundation and
+      # for our own overlay shader.
+      - name: Install Vulkan SDK (slangc)
+        run: |
+          set -eux
+          version="${{ env.VULKAN_SDK_VERSION }}"
+          curl --fail --location --retry 3 --output vulkan-sdk.tar.xz \
+            "https://sdk.lunarg.com/sdk/download/$version/linux/vulkansdk-linux-x86_64-$version.tar.xz"
+          sudo mkdir -p /opt/vulkan-sdk
+          sudo tar -xJf vulkan-sdk.tar.xz -C /opt/vulkan-sdk
+          slangc_path="$(find /opt/vulkan-sdk -type f -name slangc | head -n 1)"
+          if [ -z "$slangc_path" ]; then
+            echo "slangc not found in the Vulkan SDK tarball" >&2
+            exit 1
+          fi
+          chmod +x "$slangc_path"
+          echo "$(dirname "$slangc_path")" >> "$GITHUB_PATH"
+          "$slangc_path" -v
+
+      # Textures / sound / text are extracted from the ROM and are not in git.
+      - name: Download US baserom
+        run: |
+          curl --fail --location --retry 3 --output baserom.us.z64 \
+            "https://github.com/jb1361/Super-Mario-64-AI/raw/refs/heads/development/Super%20Mario%2064%20(USA).z64"
+          test -s baserom.us.z64
+
+      - name: Extract assets
+        run: python3 extract_assets.py us
+
+      - name: Build APK
+        working-directory: ${{ github.workspace }}/Android
+        run: |
+          set -eux
+          # Pin the NDK to whatever the runner image ships so AGP doesn't try to
+          # download its (different) default version.
+          if [ -n "${ANDROID_NDK_HOME:-}" ]; then
+            export FOUNDATION_ANDROID_NDK_VERSION="$(basename "$ANDROID_NDK_HOME")"
+            echo "Using NDK $FOUNDATION_ANDROID_NDK_VERSION"
+          fi
+          gradle --no-daemon :app:assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Foundation-sm64-android-arm64
+          path: ${{ github.workspace }}/Android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          compression-level: 9
